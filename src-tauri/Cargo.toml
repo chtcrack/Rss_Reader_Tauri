@@ -1,0 +1,38 @@
+[package]
+name = "rss_reader"
+version = "0.1.0"
+description = "A lightweight, high-performance RSS reader for Windows 10"
+authors = ["chtcr"]
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "rss_reader_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.5.3", features = [] }
+
+[dependencies]
+tauri = { version = "2.9.5", features = [] }
+tauri-plugin-notification = "2.0.1"
+tauri-plugin-opener = "2.5.2"
+serde = { version = "1.0.228", features = ["derive"] }
+chrono = { version = "0.4.42", features = ["serde"] }
+serde_json = "1.0.148"
+toml = "0.8.15"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+rss = "2.0.12"
+atom_syndication = "0.12.7"
+tokio = { version = "1.48.0", features = ["full"] }
+async-trait = "0.1.89"
+scraper = "0.25.0"
+opml = "1.1.6"
+rusqlite = { version = "0.38.0", features = ["bundled", "chrono", "serde_json"] }
+lazy_static = "1.5.0"
+headless_chrome = { version = "1.0.20", features = ["fetch"] }
+html-escape = "0.2.13"

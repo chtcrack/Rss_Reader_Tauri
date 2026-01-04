@@ -1,0 +1,431 @@
+use crate::models::AIPlatform;
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio::sync::Mutex;
+
+/// AI翻译配置
+#[derive(Debug, Clone)]
+pub struct TranslatorConfig {
+    pub max_tokens: u32,
+    pub temperature: f32,
+    pub timeout: u64,
+}
+
+impl Default for TranslatorConfig {
+    fn default() -> Self {
+        Self {
+            max_tokens: 4096,
+            temperature: 0.7,
+            timeout: 30,
+        }
+    }
+}
+
+/// AI翻译请求
+#[derive(Debug, Serialize)]
+pub struct TranslationRequest {
+    pub text: String,
+    pub target_language: String,
+    pub source_language: Option<String>,
+}
+
+/// AI翻译响应
+#[derive(Debug, Deserialize)]
+pub struct TranslationResponse {
+    pub translated_text: String,
+    pub source_language: String,
+    pub target_language: String,
+}
+
+/// AI聊天请求消息
+#[derive(Debug, Serialize, Clone)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+/// AI聊天请求
+#[derive(Debug, Serialize)]
+pub struct ChatRequest {
+    pub model: String,
+    pub messages: Vec<ChatMessage>,
+    pub max_tokens: u32,
+    pub temperature: f32,
+    pub stream: bool,
+}
+
+/// AI聊天响应片段（流式）
+#[derive(Debug, Deserialize)]
+pub struct ChatStreamResponse {
+    pub choices: Vec<ChatStreamChoice>,
+}
+
+/// AI聊天响应选项
+#[derive(Debug, Deserialize)]
+pub struct ChatStreamChoice {
+    pub delta: ChatStreamDelta,
+    pub index: u32,
+    pub finish_reason: Option<String>,
+}
+
+/// AI聊天响应增量
+#[derive(Debug, Deserialize)]
+pub struct ChatStreamDelta {
+    pub role: Option<String>,
+    pub content: Option<String>,
+}
+
+/// AI翻译器
+#[derive(Debug, Clone)]
+pub struct AITranslator {
+    client: Client,
+    config: TranslatorConfig,
+    default_platform: Arc<Mutex<Option<AIPlatform>>>,
+}
+
+impl AITranslator {
+    /// 创建新的AI翻译器
+    pub fn new(config: Option<TranslatorConfig>) -> Self {
+        Self {
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(config.as_ref().unwrap_or(&TranslatorConfig::default()).timeout))
+                .build()
+                .unwrap(),
+            config: config.unwrap_or_default(),
+            default_platform: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// 设置默认AI平台
+    pub async fn set_default_platform(&self, platform: Option<AIPlatform>) {
+        eprintln!("[AI] 设置默认AI平台: {:?}", platform);
+        let mut default_platform = self.default_platform.lock().await;
+        *default_platform = platform;
+        eprintln!("[AI] 默认AI平台设置完成");
+    }
+
+    /// 获取默认AI平台
+    pub async fn get_default_platform(&self) -> Option<AIPlatform> {
+        let default_platform = self.default_platform.lock().await;
+        let platform = default_platform.clone();
+        eprintln!("[AI] 获取默认AI平台: {:?}", platform);
+        platform
+    }
+
+    /// 翻译文本
+    pub async fn translate_text(
+        &self,
+        text: &str,
+        target_language: &str,
+        source_language: Option<&str>,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        eprintln!("[AI] ===== 开始翻译文本 =====");
+        eprintln!("[AI] 文本长度: {}, 首50字符: {}...", text.len(), text.chars().take(50).collect::<String>());
+        eprintln!("[AI] 目标语言: {}", target_language);
+        eprintln!("[AI] 源语言: {:?}", source_language);
+        
+        // 获取默认AI平台
+        eprintln!("[AI] 开始获取默认AI平台...");
+        let platform = self.get_default_platform().await;
+        if platform.is_none() {
+            eprintln!("[AI] 错误: 没有配置默认AI平台");
+            return Err("No default AI platform configured".into());
+        }
+        let platform = platform.unwrap();
+        eprintln!("[AI] 成功获取默认AI平台: {}", platform.name);
+        eprintln!("[AI] 平台API URL: {}", platform.api_url);
+        eprintln!("[AI] 平台API Model: {}", platform.api_model);
+
+        // 构建翻译提示词
+        let prompt = match source_language {
+            Some(src) => {
+                eprintln!("[AI] 使用指定源语言: {}", src);
+                format!("Translate the following text from {} to {}: {}", src, target_language, text)
+            },
+            None => {
+                eprintln!("[AI] 使用自动检测源语言");
+                format!("Translate the following text to {}: {}", target_language, text)
+            }
+        };
+        eprintln!("[AI] 提示词长度: {}", prompt.len());
+        eprintln!("[AI] 提示词前100字符: {}...", prompt.chars().take(100).collect::<String>());
+
+        // 构建聊天请求
+        eprintln!("[AI] 开始构建聊天请求...");
+        let chat_request = ChatRequest {
+            model: platform.api_model,
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: prompt,
+            }],
+            max_tokens: self.config.max_tokens,
+            temperature: self.config.temperature,
+            stream: false,
+        };
+        eprintln!("[AI] 聊天请求构建完成");
+        eprintln!("[AI] 请求max_tokens: {}, temperature: {}", chat_request.max_tokens, chat_request.temperature);
+
+        // 发送请求
+        eprintln!("[AI] 开始发送请求到API...");
+        eprintln!("[AI] API URL: {}", platform.api_url);
+        let response = match self.client
+            .post(&platform.api_url)
+            .header("Authorization", format!("Bearer {}", platform.api_key))
+            .header("Content-Type", "application/json")
+            .json(&chat_request)
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                eprintln!("[AI] 成功收到API响应");
+                eprintln!("[AI] 响应状态码: {:?}", resp.status());
+                resp
+            },
+            Err(e) => {
+                eprintln!("[AI] 发送请求失败: {}", e);
+                eprintln!("[AI] 错误详情: {:?}", e);
+                return Err(e.into());
+            }
+        };
+
+        // 解析响应
+        eprintln!("[AI] 开始读取响应内容...");
+        let response_text = match response.text().await {
+            Ok(text) => {
+                eprintln!("[AI] 成功读取响应内容，长度: {}", text.len());
+                // 确保只在有效的字符边界处截断字符串
+                let preview_len = std::cmp::min(200, text.len());
+                let truncated_text = text.char_indices().take_while(|&(i, _)| i < preview_len).map(|(_, c)| c).collect::<String>();
+                eprintln!("[AI] 响应内容前200字符: {}...", truncated_text);
+                text
+            },
+            Err(e) => {
+                eprintln!("[AI] 读取响应内容失败: {}", e);
+                return Err(e.into());
+            }
+        };
+        
+        // 解析JSON响应
+        eprintln!("[AI] 开始解析JSON响应...");
+        let response: serde_json::Value = match serde_json::from_str(&response_text) {
+            Ok(json) => {
+                eprintln!("[AI] 成功解析JSON响应");
+                json
+            },
+            Err(e) => {
+                eprintln!("[AI] JSON解析失败: {}", e);
+                eprintln!("[AI] 原始响应内容: {}", response_text);
+                return Err(e.into());
+            }
+        };
+
+        // 检查是否有错误信息
+        if let Some(error) = response.get("error") {
+            eprintln!("[AI] API返回错误: {:?}", error);
+            return Err(format!("API Error: {:?}", error).into());
+        }
+
+        // 提取翻译结果
+        eprintln!("[AI] 开始提取翻译结果...");
+        let translated_text = match response
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str())
+        {
+            Some(text) => {
+                let trimmed_text = text.trim();
+                eprintln!("[AI] 成功提取翻译结果，长度: {}", trimmed_text.len());
+                // 确保只在有效的字符边界处截断字符串
+                let preview_len = std::cmp::min(100, trimmed_text.len());
+                let truncated_text = trimmed_text.char_indices().take_while(|&(i, _)| i < preview_len).map(|(_, c)| c).collect::<String>();
+                eprintln!("[AI] 翻译结果前100字符: {}...", truncated_text);
+                trimmed_text.to_string()
+            },
+            None => {
+                eprintln!("[AI] 提取翻译结果失败");
+                eprintln!("[AI] 响应结构: {:?}", response);
+                return Err("Failed to extract translated text".into());
+            }
+        };
+        
+        eprintln!("[AI] ===== 翻译文本完成 =====");
+        Ok(translated_text)
+    }
+
+    /// 翻译RSS文章标题和内容
+    pub async fn translate_rss_content(
+        &self,
+        title: &str,
+        content: &str,
+        target_language: &str,
+    ) -> Result<(String, String), Box<dyn std::error::Error>> {
+        eprintln!("[AI] 开始翻译RSS文章标题和内容...");
+        
+        // 翻译标题
+        eprintln!("[AI] 开始翻译文章标题...");
+        let translated_title = self.translate_text(title, target_language, None).await?;
+        eprintln!("[AI] 文章标题翻译完成: {}", translated_title);
+        
+        // 翻译内容，限制内容长度以避免超出API限制
+        eprintln!("[AI] 开始翻译文章内容...");
+        // 使用字符迭代器来安全地截断内容，避免字节索引问题
+        let mut truncated_content = String::new();
+        let mut char_count = 0;
+        for c in content.chars() {
+            if char_count >= 8192 {
+                eprintln!("[AI] 文章内容过长，限制为8192字符");
+                break;
+            }
+            truncated_content.push(c);
+            char_count += 1;
+        }
+        let translated_content = self.translate_text(&truncated_content, target_language, None).await?;
+        // 安全地获取前100个字符，避免字节索引问题
+        let preview = translated_content.chars().take(100).collect::<String>();
+        eprintln!("[AI] 文章内容翻译完成: {}...", preview);
+
+        Ok((translated_title, translated_content))
+    }
+
+    /// 流式聊天
+    pub async fn chat_completion_stream(
+        &self,
+        messages: Vec<ChatMessage>,
+        max_tokens: Option<u32>,
+        temperature: Option<f32>,
+        tx: mpsc::Sender<String>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let platform = self.get_default_platform().await;
+        if platform.is_none() {
+            return Err("No default AI platform configured".into());
+        }
+        let platform = platform.unwrap();
+
+        // 构建聊天请求
+        let chat_request = ChatRequest {
+            model: platform.api_model,
+            messages,
+            max_tokens: max_tokens.unwrap_or(self.config.max_tokens),
+            temperature: temperature.unwrap_or(self.config.temperature),
+            stream: true,
+        };
+
+        // 发送请求
+        let response = self.client
+            .post(&platform.api_url)
+            .header("Authorization", format!("Bearer {}", platform.api_key))
+            .header("Content-Type", "application/json")
+            .json(&chat_request)
+            .send()
+            .await?;
+
+        // 处理流式响应
+        let bytes = response.bytes().await?;
+        let content = String::from_utf8_lossy(&bytes);
+        let lines: Vec<&str> = content.split("\n").collect();
+        
+        // 处理每一行
+        for line in &lines {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with("data: [DONE]") {
+                continue;
+            }
+
+            // 提取JSON数据
+            if let Some(json_str) = line.strip_prefix("data: ") {
+                match serde_json::from_str::<ChatStreamResponse>(json_str) {
+                    Ok(response) => {
+                        for choice in response.choices {
+                            if let Some(content) = choice.delta.content {
+                                // 发送内容片段
+                                tx.send(content).await?;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // 忽略解析错误，继续处理下一行
+                        eprintln!("Failed to parse stream response: {}", e);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// 非流式聊天
+    pub async fn chat_completion(
+        &self,
+        messages: Vec<ChatMessage>,
+        max_tokens: Option<u32>,
+        temperature: Option<f32>,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let platform = self.get_default_platform().await;
+        if platform.is_none() {
+            return Err("No default AI platform configured".into());
+        }
+        let platform = platform.unwrap();
+
+        // 构建聊天请求
+        let chat_request = ChatRequest {
+            model: platform.api_model,
+            messages,
+            max_tokens: max_tokens.unwrap_or(self.config.max_tokens),
+            temperature: temperature.unwrap_or(self.config.temperature),
+            stream: false,
+        };
+
+        // 发送请求
+        let response = self.client
+            .post(&platform.api_url)
+            .header("Authorization", format!("Bearer {}", platform.api_key))
+            .header("Content-Type", "application/json")
+            .json(&chat_request)
+            .send()
+            .await?;
+
+        // 解析响应
+        let response_text = response.text().await?;
+        let response: serde_json::Value = serde_json::from_str(&response_text)?;
+
+        // 提取聊天结果
+        let content = response
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str())
+            .ok_or("Failed to extract chat content")?
+            .to_string();
+
+        Ok(content)
+    }
+}
+
+/// AI翻译器单例
+pub struct AITranslatorSingleton {
+    translator: Arc<Mutex<AITranslator>>,
+}
+
+impl AITranslatorSingleton {
+    /// 创建单例
+    pub fn new() -> Self {
+        Self {
+            translator: Arc::new(Mutex::new(AITranslator::new(None))),
+        }
+    }
+
+    /// 获取翻译器实例
+    pub async fn get_translator(&self) -> tokio::sync::MutexGuard<'_, AITranslator> {
+        self.translator.lock().await
+    }
+}
+
+/// 全局AI翻译器实例
+lazy_static::lazy_static! {
+    pub static ref AI_TRANSLATOR: AITranslatorSingleton = AITranslatorSingleton::new();
+}

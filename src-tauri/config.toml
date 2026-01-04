@@ -1,0 +1,20 @@
+# RSS阅读器配置文件
+# 配置说明：
+# - 该文件用于配置RSS阅读器的各项参数
+# - 配置文件采用TOML格式
+# - 未配置的项将使用默认值
+
+[db]
+# 数据库文件路径类型配置
+# 可用值：
+# - "user": 使用用户AppData目录（默认，适合普通用户）
+#   路径：%APPDATA%\rss_reader\rss_reader.db
+# - "current": 使用当前可执行文件所在目录
+#   路径：当前目录\rss_reader.db
+# - "custom": 使用自定义路径（需配合custom_path配置）
+path_type = "current"
+
+# 自定义数据库文件路径（仅当path_type="custom"时生效）
+# 示例：custom_path = "D:\\rss_data\\rss_reader.db"
+# custom_path = ""
+

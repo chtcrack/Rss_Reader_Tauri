@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RSS Reader</title>
+    <script type="module" src="/main.js" defer></script>
+  </head>
+
+  <body>
+    <div class="app-container">
+      <!-- 顶部导航栏 -->
+      <header class="header">
+        <div class="header-left">
+          <h1>RSS Reader</h1>
+        </div>
+        <div class="header-center">
+          <div class="search-box">
+            <input type="text" id="search-input" placeholder="搜索文章..." />
+            <button id="search-btn">搜索</button>
+          </div>
+        </div>
+        <div class="header-right">
+          <button id="theme-toggle">🌙</button>
+          <button id="refresh-btn">🔄</button>
+          <button id="settings-btn">⚙️</button>
+        </div>
+      </header>
+
+      <!-- 主内容区域 -->
+      <div class="main-content">
+        <!-- 左侧：RSS源列表 -->
+        <aside class="feed-list">
+          <div class="feed-list-header">
+            <h2>订阅源</h2>
+            <div class="feed-list-actions">
+              <button id="add-feed-btn">+ 添加源</button>
+              <button id="add-group-btn">+ 添加分组</button>
+              <button id="export-opml-btn">📤 导出OPML</button>
+              <button id="import-opml-btn">📥 导入OPML</button>
+              <input type="file" id="opml-file-input" accept=".opml,.xml" style="display: none;" />
+            </div>
+          </div>
+          <div class="feed-groups">
+            <div class="group" id="all-feeds">
+              <div class="group-header">
+                <span class="group-name">全部</span>
+                <span class="unread-count" id="all-unread">0</span>
+              </div>
+            </div>
+            <!-- 动态生成的分组和源 -->
+          </div>
+        </aside>
+
+        <!-- 中间：文章列表 -->
+        <section class="article-list">
+          <div class="article-list-header">
+            <h2 id="current-feed-name">全部文章</h2>
+            <div class="article-list-actions">
+              <div class="article-filter">
+                <button class="filter-btn active" data-filter="all">全部</button>
+                <button class="filter-btn" data-filter="unread">未读</button>
+                <button class="filter-btn" data-filter="favorite">收藏</button>
+              </div>
+              <button id="delete-all-btn" class="danger-btn">🗑️ 全部删除</button>
+            </div>
+          </div>
+          <div class="articles" id="articles-container">
+            <!-- 动态生成的文章列表 -->
+          </div>
+        </section>
+
+        <!-- 右侧：文章内容 -->
+        <section class="article-content">
+          <div class="article-content-header">
+            <h2 id="article-title"></h2>
+            <div class="article-actions">
+              <button id="mark-read-btn">✓ 已读</button>
+              <button id="favorite-btn">❤️ 收藏</button>
+              <button id="open-link-btn">🌐 打开链接</button>
+            </div>
+            <div class="article-meta" id="article-meta"></div>
+          </div>
+          <div class="article-body" id="article-body">
+            <div class="empty-state">
+              <p>请选择一篇文章阅读</p>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <!-- 添加RSS源对话框 -->
+    <div id="add-feed-modal" class="modal">
+      <div class="modal-content">
+        <span class="close">&times;</span>
+        <h2>添加RSS源</h2>
+        <form id="add-feed-form">
+          <div class="form-group">
+            <label for="feed-name">名称：</label>
+            <input type="text" id="feed-name" placeholder="输入RSS源名称" required />
+          </div>
+          <div class="form-group">
+            <label for="feed-url">URL：</label>
+            <input type="url" id="feed-url" placeholder="输入RSS源URL" required />
+          </div>
+          <div class="form-group">
+            <label for="feed-group">分组：</label>
+            <select id="feed-group">
+              <option value="">无分组</option>
+              <!-- 动态生成分组选项 -->
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="translate-enabled">AI翻译：</label>
+            <input type="checkbox" id="translate-enabled" />
+            <span class="help-text">启用后，会自动翻译文章标题和内容</span>
+          </div>
+          <div class="form-actions">
+            <button type="submit">添加</button>
+            <button type="button" class="cancel">取消</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- 添加分组对话框 -->
+    <div id="add-group-modal" class="modal">
+      <div class="modal-content">
+        <span class="close">&times;</span>
+        <h2>添加分组</h2>
+        <form id="add-group-form">
+          <div class="form-group">
+            <label for="group-name">分组名称：</label>
+            <input type="text" id="group-name" placeholder="输入分组名称" required />
+          </div>
+          <div class="form-group">
+            <label for="group-order">排序索引：</label>
+            <input type="number" id="group-order" value="0" min="0" />
+          </div>
+          <div class="form-actions">
+            <button type="submit">添加</button>
+            <button type="button" class="cancel">取消</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- 编辑分组对话框 -->
+    <div id="edit-group-modal" class="modal">
+      <div class="modal-content">
+        <span class="close">&times;</span>
+        <h2>编辑分组</h2>
+        <form id="edit-group-form">
+          <input type="hidden" id="edit-group-id" />
+          <div class="form-group">
+            <label for="edit-group-name">分组名称：</label>
+            <input type="text" id="edit-group-name" placeholder="输入分组名称" required />
+          </div>
+          <div class="form-group">
+            <label for="edit-group-order">排序索引：</label>
+            <input type="number" id="edit-group-order" value="0" min="0" />
+          </div>
+          <div class="form-actions">
+            <button type="submit">保存</button>
+            <button type="button" class="cancel">取消</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- 删除分组确认对话框 -->
+    <div id="delete-group-modal" class="modal">
+      <div class="modal-content">
+        <span class="close">&times;</span>
+        <h2>删除分组</h2>
+        <p>确定要删除分组 <span id="delete-group-name"></span> 吗？此操作不可恢复。</p>
+        <input type="hidden" id="delete-group-id" />
+        <div class="form-actions">
+          <button id="confirm-delete-group" class="danger">删除</button>
+          <button type="button" class="cancel">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 编辑订阅源对话框 -->
+    <div id="edit-feed-modal" class="modal">
+      <div class="modal-content">
+        <span class="close">&times;</span>
+        <h2>编辑订阅源</h2>
+        <form id="edit-feed-form">
+          <input type="hidden" id="edit-feed-id" />
+          <div class="form-group">
+            <label for="edit-feed-name">名称：</label>
+            <input type="text" id="edit-feed-name" placeholder="输入RSS源名称" required />
+          </div>
+          <div class="form-group">
+            <label for="edit-feed-url">URL：</label>
+            <input type="url" id="edit-feed-url" placeholder="输入RSS源URL" required />
+          </div>
+          <div class="form-group">
+            <label for="edit-feed-group">分组：</label>
+            <select id="edit-feed-group">
+              <option value="">无分组</option>
+              <!-- 动态生成分组选项 -->
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="edit-translate-enabled">AI翻译：</label>
+            <input type="checkbox" id="edit-translate-enabled" />
+            <span class="help-text">启用后，会自动翻译文章标题和内容</span>
+          </div>
+          <div class="form-actions">
+            <button type="submit">保存</button>
+            <button type="button" class="cancel">取消</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- 删除订阅源确认对话框 -->
+    <div id="delete-feed-modal" class="modal">
+      <div class="modal-content">
+        <span class="close">&times;</span>
+        <h2>删除订阅源</h2>
+        <p>确定要删除订阅源 <span id="delete-feed-name"></span> 吗？此操作将同时删除该订阅源的所有文章，不可恢复。</p>
+        <input type="hidden" id="delete-feed-id" />
+        <div class="form-actions">
+          <button id="confirm-delete-feed" class="danger">删除</button>
+          <button type="button" class="cancel">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 删除文章确认对话框 -->
+    <div id="delete-articles-modal" class="modal">
+      <div class="modal-content">
+        <span class="close">&times;</span>
+        <h2>删除文章</h2>
+        <p id="delete-articles-message">确定要删除所有文章吗？此操作不可恢复。</p>
+        <div class="form-actions">
+          <button id="confirm-delete-articles" class="danger">删除</button>
+          <button type="button" class="cancel">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- AI平台管理对话框 -->
+    <div id="ai-platforms-modal" class="modal">
+      <div class="modal-content">
+        <span class="close">&times;</span>
+        <h2>设置</h2>
+        
+        <!-- 自动更新设置 -->
+        <div class="settings-section">
+          <h3>自动更新设置</h3>
+          <div class="form-group">
+            <label for="update-interval">自动更新间隔（分钟）：</label>
+            <select id="update-interval">
+              <option value="1">1分钟</option>
+              <option value="5" selected>5分钟</option>
+              <option value="10">10分钟</option>
+              <option value="15">15分钟</option>
+              <option value="30">30分钟</option>
+              <option value="60">1小时</option>
+              <option value="120">2小时</option>
+              <option value="360">6小时</option>
+              <option value="720">12小时</option>
+              <option value="1440">24小时</option>
+            </select>
+          </div>
+          <div class="form-actions">
+            <button id="save-update-interval">保存设置</button>
+          </div>
+        </div>
+        
+        <!-- AI平台管理 -->
+        <div class="settings-section">
+          <h3>AI平台管理</h3>
+          <div class="ai-platforms-list" id="ai-platforms-list">
+            <!-- 动态生成AI平台列表 -->
+          </div>
+          <div class="ai-platforms-actions">
+            <button id="add-ai-platform-btn">+ 添加AI平台</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 添加AI平台对话框 -->
+    <div id="add-ai-platform-modal" class="modal">
+      <div class="modal-content">
+        <span class="close">&times;</span>
+        <h2>添加AI平台</h2>
+        <form id="add-ai-platform-form">
+          <div class="form-group">
+            <label for="ai-platform-name">平台名称：</label>
+            <input type="text" id="ai-platform-name" placeholder="输入AI平台名称" required />
+          </div>
+          <div class="form-group">
+            <label for="ai-platform-url">API URL：</label>
+            <input type="url" id="ai-platform-url" placeholder="输入API URL" required />
+          </div>
+          <div class="form-group">
+            <label for="ai-platform-key">API KEY：</label>
+            <input type="password" id="ai-platform-key" placeholder="输入API KEY" required />
+          </div>
+          <div class="form-group">
+            <label for="ai-platform-model">API Model：</label>
+            <input type="text" id="ai-platform-model" placeholder="输入API Model" required />
+          </div>
+          <div class="form-group">
+            <label for="ai-platform-is-default">设为默认平台：</label>
+            <input type="checkbox" id="ai-platform-is-default" />
+          </div>
+          <div class="form-actions">
+            <button type="submit">添加</button>
+            <button type="button" class="cancel">取消</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- 编辑AI平台对话框 -->
+    <div id="edit-ai-platform-modal" class="modal">
+      <div class="modal-content">
+        <span class="close">&times;</span>
+        <h2>编辑AI平台</h2>
+        <form id="edit-ai-platform-form">
+          <input type="hidden" id="edit-ai-platform-id" />
+          <div class="form-group">
+            <label for="edit-ai-platform-name">平台名称：</label>
+            <input type="text" id="edit-ai-platform-name" placeholder="输入AI平台名称" required />
+          </div>
+          <div class="form-group">
+            <label for="edit-ai-platform-url">API URL：</label>
+            <input type="url" id="edit-ai-platform-url" placeholder="输入API URL" required />
+          </div>
+          <div class="form-group">
+            <label for="edit-ai-platform-key">API KEY：</label>
+            <input type="password" id="edit-ai-platform-key" placeholder="输入API KEY" required />
+          </div>
+          <div class="form-group">
+            <label for="edit-ai-platform-model">API Model：</label>
+            <input type="text" id="edit-ai-platform-model" placeholder="输入API Model" required />
+          </div>
+          <div class="form-group">
+            <label for="edit-ai-platform-is-default">设为默认平台：</label>
+            <input type="checkbox" id="edit-ai-platform-is-default" />
+          </div>
+          <div class="form-actions">
+            <button type="submit">保存</button>
+            <button type="button" class="cancel">取消</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- 删除AI平台确认对话框 -->
+    <div id="delete-ai-platform-modal" class="modal">
+      <div class="modal-content">
+        <span class="close">&times;</span>
+        <h2>删除AI平台</h2>
+        <p>确定要删除AI平台 <span id="delete-ai-platform-name"></span> 吗？此操作不可恢复。</p>
+        <input type="hidden" id="delete-ai-platform-id" />
+        <div class="form-actions">
+          <button id="confirm-delete-ai-platform" class="danger">删除</button>
+          <button type="button" class="cancel">取消</button>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>
