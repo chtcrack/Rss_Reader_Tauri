@@ -36,3 +36,4 @@ rusqlite = { version = "0.38.0", features = ["bundled", "chrono", "serde_json"] 
 lazy_static = "1.5.0"
 headless_chrome = { version = "1.0.20", features = ["fetch"] }
 html-escape = "0.2.13"
+url = "2.5.2"

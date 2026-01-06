@@ -32,10 +32,15 @@ let currentGroupId = null;
 let currentEditingGroup = null;
 let currentEditingFeed = null;
 
+// 订阅源ID到名称的映射
+let feedMap = new Map();
+
 // 删除文章相关变量
 let deleteAllBtn;
 let deleteArticlesModal;
 let confirmDeleteArticlesBtn;
+let currentDeletingArticleId = null; // 当前要删除的文章ID
+let deleteType = 'all'; // 'all' 或 'single'
 
 // AI平台相关状态
 let aiPlatformsModal;
@@ -810,6 +815,8 @@ function initEventListeners() {
   // 删除文章按钮点击事件
   if (deleteAllBtn) {
     deleteAllBtn.addEventListener('click', () => {
+      // 设置删除类型为全部
+      deleteType = 'all';
       // 根据currentFeedId设置删除消息
       const deleteMessage = document.getElementById('delete-articles-message');
       if (currentFeedId) {
@@ -850,7 +857,18 @@ function initEventListeners() {
   if (confirmDeleteArticlesBtn) {
     confirmDeleteArticlesBtn.addEventListener('click', async () => {
       try {
-        await invoke('delete_articles', { feedId: currentFeedId });
+        if (deleteType === 'single' && currentDeletingArticleId) {
+          // 删除单篇文章
+          await invoke('delete_article', { articleId: currentDeletingArticleId });
+          // 清空当前文章内容显示
+          document.getElementById('article-title').textContent = '';
+          document.getElementById('article-body').innerHTML = '<div class="empty-state"><p>请选择一篇文章阅读</p></div>';
+          document.getElementById('article-meta').innerHTML = '';
+        } else {
+          // 删除所有文章
+          await invoke('delete_articles', { feedId: currentFeedId });
+        }
+        
         deleteArticlesModal.classList.remove('show');
         await loadFilteredArticles(); // 重新加载文章列表
         await updateUnreadCounts(); // 更新未读计数
@@ -907,6 +925,12 @@ async function loadFeeds() {
     
     console.log('成功加载RSS源列表:', feeds.length, '个源');
     console.log('成功加载分组列表:', groups.length, '个分组');
+    
+    // 更新订阅源ID到名称的映射
+    feedMap.clear();
+    feeds.forEach(feed => {
+      feedMap.set(feed.id, feed.name);
+    });
     
     const feedGroups = document.querySelector('.feed-groups');
     
@@ -1466,9 +1490,12 @@ async function loadArticleContent(article) {
   const contentToShow = article.translated_content || article.content;
   document.getElementById('article-title').textContent = titleToShow;
   document.getElementById('article-body').innerHTML = contentToShow;
+  // 获取订阅源名称
+  const feedName = feedMap.get(article.feed_id) || '未知来源';
   document.getElementById('article-meta').innerHTML = `
     <span>作者: ${article.author || '未知'}</span>
     <span>发布时间: ${new Date(article.pub_date).toLocaleString()}</span>
+    <span>来源: ${feedName}</span>
   `;
     
     // 更新文章操作按钮状态
@@ -1563,6 +1590,21 @@ async function loadArticleContent(article) {
           console.error('打开链接失败:', error);
           alert('打开链接失败: ' + error.message);
         }
+      };
+    }
+    
+    // 删除文章按钮事件
+    const deleteArticleBtn = document.getElementById('delete-article-btn');
+    if (deleteArticleBtn) {
+      deleteArticleBtn.onclick = () => {
+        // 设置删除类型为单篇
+        deleteType = 'single';
+        // 设置当前要删除的文章ID
+        currentDeletingArticleId = article.id;
+        // 显示删除确认对话框
+        const deleteMessage = document.getElementById('delete-articles-message');
+        deleteMessage.textContent = '确定要删除这篇文章吗？此操作不可恢复。';
+        deleteArticlesModal.classList.add('show');
       };
     }
     

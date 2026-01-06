@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <link rel="stylesheet" href="styles.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="referrer" content="no-referrer" />
     <title>RSS Reader</title>
     <script type="module" src="/main.js" defer></script>
   </head>
@@ -76,10 +77,11 @@
           <div class="article-content-header">
             <h2 id="article-title"></h2>
             <div class="article-actions">
-              <button id="mark-read-btn">✓ 已读</button>
-              <button id="favorite-btn">❤️ 收藏</button>
-              <button id="open-link-btn">🌐 打开链接</button>
-            </div>
+            <button id="mark-read-btn">✓ 已读</button>
+            <button id="favorite-btn">❤️ 收藏</button>
+            <button id="open-link-btn">🌐 打开链接</button>
+            <button id="delete-article-btn">🗑️ 删除</button>
+          </div>
             <div class="article-meta" id="article-meta"></div>
           </div>
           <div class="article-body" id="article-body">

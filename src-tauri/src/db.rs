@@ -768,6 +768,23 @@ impl DbManager {
         
         Ok(())
     }
+    
+    /// 删除单篇文章
+    pub fn delete_article(&mut self, article_id: i64) -> Result<()> {
+        // 开始事务
+        let tx = self.conn.transaction()?;
+        
+        // 删除特定文章
+        tx.execute(
+            "DELETE FROM articles WHERE id = ?",
+            params![article_id],
+        )?;
+        
+        // 提交事务
+        tx.commit()?;
+        
+        Ok(())
+    }
 
     /// 导出OPML文件
     pub fn export_opml(&self) -> Result<String> {

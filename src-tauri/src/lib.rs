@@ -205,8 +205,8 @@ async fn update_single_feed(app: tauri::AppHandle, app_state: State<'_, AppState
             }
         }
     }
-    
-    Ok(())
+      
+      Ok(())
 }
 
 // 异步Tauri命令：添加RSS源
@@ -579,6 +579,16 @@ async fn delete_articles(app_state: State<'_, AppState>, feed_id: Option<i64>) -
     db_manager.delete_articles(feed_id).map_err(|e| {
         eprintln!("Failed to delete articles from database: {}", e);
         format!("Failed to delete articles: {}", e)
+    })
+}
+
+// Tauri命令：删除单篇文章
+#[tauri::command(async, rename_all = "camelCase")]
+async fn delete_article(app_state: State<'_, AppState>, article_id: i64) -> Result<(), String> {
+    let mut db_manager = app_state.db_manager.lock().await;
+    db_manager.delete_article(article_id).map_err(|e| {
+        eprintln!("Failed to delete article from database: {}", e);
+        format!("Failed to delete article: {}", e)
     })
 }
 
@@ -1113,6 +1123,7 @@ pub fn run() {
             delete_ai_platform,
             set_default_ai_platform,
             delete_articles,
+            delete_article,
             open_link,
             update_update_interval
         ))

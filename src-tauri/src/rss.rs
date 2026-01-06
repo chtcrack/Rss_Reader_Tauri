@@ -140,13 +140,13 @@ impl RssParser {
     }
 
     /// 解析RSS或Atom内容
-    pub fn parse(&self, content: &str) -> Result<Vec<Article>, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn parse(&self, content: &str, base_url: &str) -> Result<Vec<Article>, Box<dyn std::error::Error + Send + Sync>> {
         // 尝试解析为RSS格式
         if let Ok(channel) = Channel::read_from(content.as_bytes()) {
             // 转换RSS项为文章
             let articles: Vec<Article> = channel.items()
                 .iter()
-                .map(|item| self.rss_item_to_article(item, 0))
+                .map(|item| self.rss_item_to_article(item, 0, base_url))
                 .collect();
             Ok(articles)
         } 
@@ -155,7 +155,7 @@ impl RssParser {
             // 转换Atom条目为文章
             let articles: Vec<Article> = atom_feed.entries()
                 .iter()
-                .map(|entry| self.atom_item_to_article(entry, 0))
+                .map(|entry| self.atom_item_to_article(entry, 0, base_url))
                 .collect();
             Ok(articles)
         } 
@@ -175,7 +175,7 @@ impl RssParser {
     }
 
     /// 将RSS项转换为文章模型
-    pub fn rss_item_to_article(&self, item: &Item, feed_id: i64) -> Article {
+    pub fn rss_item_to_article(&self, item: &Item, feed_id: i64, base_url: &str) -> Article {
         let pub_date = item.pub_date().and_then(|d| {
             chrono::DateTime::parse_from_rfc2822(d)
                 .ok()
@@ -186,19 +186,24 @@ impl RssParser {
             .map(|c| c.name().to_string())
             .collect();
 
+        // 获取文章内容，优先使用content:encoded，其次使用description
+        let content = item.content()
+            .unwrap_or_else(|| item.description().unwrap_or(""))
+            .to_string();
+
         let thumbnail = item.enclosure()
             .and_then(|e| {
                 if e.mime_type().starts_with("image/") {
                     let url = e.url().to_string();
                     // 修复图片URL
-                    self.fix_image_url(&url)
+                    self.fix_image_url(&url, base_url)
                 } else {
                     None
                 }
             })
             .or_else(|| {
                 // 尝试从内容中提取第一张图片
-                self.extract_first_image(item.description().unwrap_or_default())
+                self.extract_first_image(&content, base_url)
             });
 
         let original_link = item.link().unwrap_or("");
@@ -208,7 +213,7 @@ impl RssParser {
             id: 0, // 数据库将自动生成
             feed_id,
             title: item.title().unwrap_or("无标题").to_string(),
-            content: item.description().unwrap_or("").to_string(),
+            content,
             pub_date,
             link: normalized_link,
             is_read: false,
@@ -222,7 +227,7 @@ impl RssParser {
     }
 
     /// 将Atom条目转换为文章模型
-    pub fn atom_item_to_article(&self, entry: &AtomEntry, feed_id: i64) -> Article {
+    pub fn atom_item_to_article(&self, entry: &AtomEntry, feed_id: i64, base_url: &str) -> Article {
         // 处理发布日期，确保转换为Utc时间
         let pub_date: DateTime<Utc> = entry.published()
             .map(|dt| dt.with_timezone(&Utc))
@@ -236,14 +241,14 @@ impl RssParser {
         let thumbnail = entry.links().iter()
             .find(|link| link.rel() == "enclosure" && 
                    link.mime_type().map(|mt| mt.starts_with("image/")) == Some(true))
-            .and_then(|link| self.fix_image_url(link.href()))
+            .and_then(|link| self.fix_image_url(link.href(), base_url))
             .or_else(|| {
                 // 尝试从内容中提取第一张图片
                 let content = entry.content()
                     .and_then(|c| c.value())
                     .or_else(|| entry.summary().map(|s| &**s))
                     .unwrap_or_default();
-                self.extract_first_image(content)
+                self.extract_first_image(content, base_url)
             });
 
         // 处理内容
@@ -283,18 +288,18 @@ impl RssParser {
     }
 
     /// 从HTML内容中提取第一张图片，并确保URL是完整的绝对路径
-    fn extract_first_image(&self, content: &str) -> Option<String> {
+    fn extract_first_image(&self, content: &str, base_url: &str) -> Option<String> {
         let document = scraper::Html::parse_document(content);
         let img_selector = scraper::Selector::parse("img").ok()?;
         let img_element = document.select(&img_selector).next()?;
         let src = img_element.value().attr("src")?;
         
         // 处理图片URL，确保是完整的绝对路径
-        self.fix_image_url(src)
+        self.fix_image_url(src, base_url)
     }
     
     /// 修复图片URL，确保是完整的绝对路径
-    fn fix_image_url(&self, url: &str) -> Option<String> {
+    fn fix_image_url(&self, url: &str, base_url: &str) -> Option<String> {
         // 移除前后空格
         let url = url.trim();
         
@@ -303,21 +308,26 @@ impl RssParser {
             return Some(url.to_string());
         }
         
-        // 如果是相对路径，尝试修复（这里简化处理，实际应用中可能需要更复杂的逻辑）
-        // 注意：这里的修复逻辑比较简单，实际应用中可能需要根据RSS源的URL来构建完整路径
-        // 由于当前方法上下文没有RSS源URL，我们只能进行一些基本的修复
-        
         // 处理以//开头的URL，添加协议
         if url.starts_with("//") {
             return Some(format!("https:{}", url));
         }
         
-        // 处理以/开头的URL，假设是根相对路径
-        // 这里我们无法确定完整的域名，所以只能返回原始URL
-        // 在实际应用中，应该使用RSS源的URL作为基础来构建完整路径
+        // 处理相对路径，使用RSS源的URL作为基础
+        let base_url = url::Url::parse(base_url).ok()?;
         
-        // 返回处理后的URL
-        Some(url.to_string())
+        // 处理以/开头的根相对路径
+        if url.starts_with("/") {
+            let mut new_url = base_url.clone();
+            new_url.set_path(url);
+            new_url.set_query(None);
+            new_url.set_fragment(None);
+            return Some(new_url.to_string());
+        }
+        
+        // 处理相对路径
+        let new_url = base_url.join(url).ok()?;
+        Some(new_url.to_string())
     }
 }
 
@@ -373,8 +383,8 @@ impl RssUpdater {
         // 使用reqwest获取内容
         let content = self.reqwest_fetcher.fetch(&feed.url).await?;
 
-        // 解析RSS或Atom内容
-        let mut articles = self.parser.parse(&content)?;
+        // 解析RSS或Atom内容，传递feed.url作为base_url
+        let mut articles = self.parser.parse(&content, &feed.url)?;
         
         // 设置feed_id
         for article in &mut articles {
