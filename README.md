@@ -1,7 +1,7 @@
 # Rust RSS阅读器 for Windows 10
 
 一个轻量级、高性能的RSS阅读器，具有现代化的用户界面和流畅的用户体验。
-使用Tauri 框架，前端采用html+javascript+css,后端采用Rust，可显示图片，网页布局
+使用Tauri 框架，前端采用webview2+html+javascript+css,后端采用Rust，可显示图片，网页布局
 
 ## 功能特性
 
