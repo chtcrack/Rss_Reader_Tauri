@@ -1450,12 +1450,15 @@ async function loadArticles(feedId = null, page = 1, size = pageSize) {
       
       // 优先使用翻译后的标题
       const listTitle = article.translated_title || article.title;
+      // 获取订阅源名称
+      const feedName = feedMap.get(article.feed_id) || '未知来源';
       articleItem.innerHTML = `
         ${thumbnailHtml}
         <div class="article-info">
           <h3 class="article-item-title">${listTitle}</h3>
           <div class="article-item-meta">
             <span>${new Date(article.pub_date).toLocaleString()}</span>
+            <span class="article-source">${feedName}</span>
             ${favoriteIcon}
           </div>
         </div>
@@ -1811,12 +1814,15 @@ async function loadFilteredArticles(page = 1, size = pageSize, append = false) {
       
       // 优先使用翻译后的标题
       const listTitle = article.translated_title || article.title;
+      // 获取订阅源名称
+      const feedName = feedMap.get(article.feed_id) || '未知来源';
       articleItem.innerHTML = `
         ${thumbnailHtml}
         <div class="article-info">
           <h3 class="article-item-title">${listTitle}</h3>
           <div class="article-item-meta">
             <span>${new Date(article.pub_date).toLocaleString()}</span>
+            <span class="article-source">${feedName}</span>
             ${favoriteIcon}
           </div>
         </div>
@@ -2046,10 +2052,8 @@ async function performSearch(page = 1, size = pageSize, append = false) {
 
 // 页面加载完成后初始化
 window.addEventListener('DOMContentLoaded', async () => {
-  // 初始化事件监听器
   initEventListeners();
   
-  // 初始化数据库
   try {
     await invoke('init_db');
   } catch (error) {
@@ -2057,7 +2061,6 @@ window.addEventListener('DOMContentLoaded', async () => {
     showNotification('初始化数据库失败: ' + error.message, 'error');
   }
   
-  // 初始化AI翻译器
   try {
     await invoke('init_ai_translator');
   } catch (error) {
@@ -2065,17 +2068,384 @@ window.addEventListener('DOMContentLoaded', async () => {
     showNotification('初始化AI翻译器失败: ' + error.message, 'error');
   }
   
-  // 添加Tauri事件监听器，监听feed_updated事件
+  // 初始化AI聊天功能
+  initAIChat();
+  
+  // 监听feed_updated事件
   await listen('feed_updated', (event) => {
     console.log('收到feed_updated事件:', event.payload);
-    // 更新未读计数和文章列表
     updateUnreadCounts();
     loadFilteredArticles();
   });
   
+  // 监听AI聊天响应事件
+  await listen('ai_chat_response', (event) => {
+    handleChatResponse(event.payload);
+  });
+  
+  // 监听AI聊天结束事件
+  await listen('ai_chat_end', () => {
+    console.log('AI聊天结束');
+    // 可以在这里添加一些聊天结束后的处理逻辑
+  });
+  
+  // 加载RSS源列表
   await loadFeeds();
+  
+  // 加载文章列表
   await loadFilteredArticles();
 });
+
+// AI聊天功能
+let aiChatModal;
+let aiChatBtn;
+let aiChatMessages;
+let aiChatInput;
+let sendChatBtn;
+let clearChatBtn;
+let aiPlatformSelect;
+let chatHistory = [];
+const MAX_CONTEXT_SIZE = 8192;
+const CHAT_HISTORY_KEY = 'ai_chat_history';
+
+// 从localStorage加载聊天记录
+function loadChatHistory() {
+  try {
+    const savedHistory = localStorage.getItem(CHAT_HISTORY_KEY);
+    if (savedHistory) {
+      const parsedHistory = JSON.parse(savedHistory);
+      // 恢复日期对象
+      chatHistory = parsedHistory.map(msg => ({
+        ...msg,
+        timestamp: new Date(msg.timestamp)
+      }));
+    }
+  } catch (error) {
+    console.error('加载聊天记录失败:', error);
+    chatHistory = [];
+  }
+}
+
+// 保存聊天记录到localStorage
+function saveChatHistory() {
+  try {
+    localStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(chatHistory));
+  } catch (error) {
+    console.error('保存聊天记录失败:', error);
+  }
+}
+
+// 初始化AI聊天功能
+function initAIChat() {
+  // 加载聊天记录
+  loadChatHistory();
+  
+  // 获取DOM元素
+  aiChatModal = document.getElementById('ai-chat-modal');
+  aiChatBtn = document.getElementById('ai-chat-btn');
+  aiChatMessages = document.getElementById('ai-chat-messages');
+  aiChatInput = document.getElementById('ai-chat-input');
+  sendChatBtn = document.getElementById('send-chat-btn');
+  clearChatBtn = document.getElementById('clear-chat-btn');
+  aiPlatformSelect = document.getElementById('ai-platform-select');
+  
+  // AI聊天按钮点击事件
+  if (aiChatBtn) {
+    aiChatBtn.addEventListener('click', async () => {
+      aiChatModal.classList.add('show');
+    // 加载AI平台列表
+    await loadAIPlatformsToSelect();
+    // 初始化聊天界面
+    updateChatMessages();
+  });
+  }
+  
+  // 发送消息按钮点击事件
+  if (sendChatBtn) {
+    sendChatBtn.addEventListener('click', async () => {
+      await sendMessage();
+    });
+  }
+  
+  // 输入框回车发送消息
+  if (aiChatInput) {
+    aiChatInput.addEventListener('keypress', async (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        await sendMessage();
+      }
+    });
+  }
+  
+  // 清理聊天记录按钮点击事件
+  if (clearChatBtn) {
+    clearChatBtn.addEventListener('click', () => {
+      clearChatHistory();
+    });
+  }
+  
+  // AI平台选择器change事件
+  if (aiPlatformSelect) {
+    aiPlatformSelect.addEventListener('change', async (e) => {
+      console.log('AI平台已切换，仅影响当前聊天会话');
+    });
+  }
+  
+  // 模态框外部点击关闭
+  if (aiChatModal) {
+    aiChatModal.addEventListener('click', (e) => {
+      if (e.target === aiChatModal) {
+        aiChatModal.classList.remove('show');
+      }
+    });
+  }
+  
+  // 关闭按钮点击事件
+  const closeBtns = aiChatModal.querySelectorAll('.close');
+  closeBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      aiChatModal.classList.remove('show');
+    });
+  });
+}
+
+// 加载AI平台列表到选择框
+async function loadAIPlatformsToSelect() {
+  try {
+    const aiPlatforms = await invoke('get_all_ai_platforms');
+    const select = aiPlatformSelect;
+    
+    // 清空现有选项
+    select.innerHTML = '';
+    
+    // 添加AI平台选项
+    aiPlatforms.forEach(platform => {
+      const option = document.createElement('option');
+      option.value = platform.id;
+      option.textContent = platform.name;
+      select.appendChild(option);
+      
+      // 如果是默认平台，设置为选中状态
+      if (platform.is_default) {
+        option.selected = true;
+      }
+    });
+  } catch (error) {
+    console.error('加载AI平台列表失败:', error);
+  }
+}
+
+// 发送消息
+async function sendMessage() {
+  const message = aiChatInput.value.trim();
+  if (!message) return;
+  
+  // 添加用户消息到聊天历史
+  const userMsg = {
+    role: 'user',
+    content: message,
+    timestamp: new Date()
+  };
+  chatHistory.push(userMsg);
+  
+  // 更新聊天界面
+  updateChatMessages();
+  
+  // 保存聊天记录
+  saveChatHistory();
+  
+  // 清空输入框
+  aiChatInput.value = '';
+  
+  // 处理上下文大小
+  manageChatContext();
+  
+  // 添加AI正在输入消息
+  const aiThinkingMsg = {
+    role: 'ai',
+    content: '正在思考...',
+    timestamp: new Date()
+  };
+  chatHistory.push(aiThinkingMsg);
+  updateChatMessages();
+  
+  // 保存聊天记录
+  saveChatHistory();
+  
+  // 构建聊天请求，过滤掉临时消息和转换角色
+  const messages = chatHistory
+    // 过滤掉"正在思考..."消息
+    .filter(msg => msg.content !== '正在思考...')
+    // 转换角色，将'ai'转换为API接受的'assistant'
+    .map(msg => ({
+      role: msg.role === 'ai' ? 'assistant' : msg.role,
+      content: msg.content
+    }));
+  
+  console.log('发送给API的消息:', messages);
+  
+  // 获取当前选择的AI平台ID
+  const platformId = parseInt(aiPlatformSelect.value);
+  
+  // 发送聊天请求
+  try {
+    // 调用后端AI聊天接口
+    await invoke('ai_chat', {
+      messages: messages,
+      maxTokens: 4096,
+      temperature: 0.7,
+      platformId: platformId
+    });
+  } catch (error) {
+    console.error('AI聊天请求失败:', error);
+    // 替换正在思考消息为错误消息
+    chatHistory[chatHistory.length - 1].content = `AI聊天失败: ${error.message}`;
+    updateChatMessages();
+    
+    // 保存聊天记录
+    saveChatHistory();
+  }
+}
+
+// 处理聊天响应
+function handleChatResponse(content) {
+  // 如果最后一条消息是AI正在思考，替换内容
+  if (chatHistory.length > 0 && chatHistory[chatHistory.length - 1].role === 'ai') {
+    if (chatHistory[chatHistory.length - 1].content === '正在思考...') {
+      // 替换正在思考消息为实际内容
+      chatHistory[chatHistory.length - 1].content = content;
+      chatHistory[chatHistory.length - 1].timestamp = new Date();
+    } else {
+      // 追加内容
+      chatHistory[chatHistory.length - 1].content += content;
+      chatHistory[chatHistory.length - 1].timestamp = new Date();
+    }
+  } else {
+    // 添加新的AI消息
+    chatHistory.push({
+      role: 'ai',
+      content: content,
+      timestamp: new Date()
+    });
+  }
+  updateChatMessages();
+  // 保存聊天记录
+  saveChatHistory();
+}
+
+// 更新聊天消息界面
+function updateChatMessages() {
+  if (!aiChatMessages) return;
+  
+  // 检查是否为空聊天
+  if (chatHistory.length === 0) {
+    aiChatMessages.innerHTML = '';
+    const emptyChat = document.createElement('div');
+    emptyChat.className = 'empty-chat';
+    emptyChat.innerHTML = `
+      <div class="empty-chat-icon">🤖</div>
+      <div class="empty-chat-text">开始与AI聊天</div>
+      <div class="empty-chat-subtext">输入您的问题或想法，AI会为您提供帮助</div>
+    `;
+    aiChatMessages.appendChild(emptyChat);
+    return;
+  }
+  
+  // 检查是否需要重新渲染整个聊天历史
+  const existingMessages = aiChatMessages.querySelectorAll('.chat-message');
+  if (existingMessages.length !== chatHistory.length) {
+    // 消息数量变化，重新渲染
+    aiChatMessages.innerHTML = '';
+    renderAllMessages();
+  } else {
+    // 只更新最后一条AI消息（如果是AI正在回复）
+    updateLastAIMessage();
+  }
+  
+  // 滚动到底部
+  aiChatMessages.scrollTop = aiChatMessages.scrollHeight;
+}
+
+// 渲染所有聊天消息
+function renderAllMessages() {
+  chatHistory.forEach(msg => {
+    const messageDiv = createMessageElement(msg);
+    aiChatMessages.appendChild(messageDiv);
+  });
+}
+
+// 创建单个消息元素
+function createMessageElement(msg) {
+  const messageDiv = document.createElement('div');
+  messageDiv.className = `chat-message ${msg.role}`;
+  messageDiv.dataset.messageIndex = chatHistory.indexOf(msg);
+  
+  const avatar = document.createElement('div');
+  avatar.className = 'message-avatar';
+  avatar.textContent = msg.role === 'user' ? '👤' : '🤖';
+  
+  const content = document.createElement('div');
+  content.className = 'message-content';
+  
+  const bubble = document.createElement('div');
+  bubble.className = 'message-bubble';
+  bubble.textContent = msg.content;
+  
+  const time = document.createElement('div');
+  time.className = 'message-time';
+  time.textContent = msg.timestamp.toLocaleTimeString();
+  
+  content.appendChild(bubble);
+  messageDiv.appendChild(avatar);
+  messageDiv.appendChild(content);
+  messageDiv.appendChild(time);
+  
+  return messageDiv;
+}
+
+// 更新最后一条AI消息
+function updateLastAIMessage() {
+  const lastMessage = chatHistory[chatHistory.length - 1];
+  if (lastMessage.role === 'ai') {
+    const existingMessages = aiChatMessages.querySelectorAll('.chat-message');
+    const lastElement = existingMessages[existingMessages.length - 1];
+    if (lastElement) {
+      const bubble = lastElement.querySelector('.message-bubble');
+      if (bubble) {
+        bubble.textContent = lastMessage.content;
+      }
+      const time = lastElement.querySelector('.message-time');
+      if (time) {
+        time.textContent = lastMessage.timestamp.toLocaleTimeString();
+      }
+    }
+  }
+}
+
+// 清理聊天历史
+function clearChatHistory() {
+  chatHistory = [];
+  updateChatMessages();
+  
+  // 保存聊天记录
+  saveChatHistory();
+}
+
+// 管理聊天上下文，确保不超过最大限制
+function manageChatContext() {
+  // 计算当前上下文大小
+  let contextSize = 0;
+  for (const msg of chatHistory) {
+    contextSize += msg.content.length;
+  }
+  
+  // 如果超过最大限制，移除最早的消息
+  while (contextSize > MAX_CONTEXT_SIZE && chatHistory.length > 2) {
+    // 移除第一条消息（保留至少一条用户消息和一条AI消息）
+    const removedMsg = chatHistory.shift();
+    contextSize -= removedMsg.content.length;
+  }
+}
 
 // OPML导出功能实现
 async function exportOpml() {

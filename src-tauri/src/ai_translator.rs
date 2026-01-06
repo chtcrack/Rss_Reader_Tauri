@@ -3,7 +3,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio::sync::Mutex;
+use futures::StreamExt;
 
 /// AI翻译配置
 #[derive(Debug, Clone)]
@@ -40,7 +40,7 @@ pub struct TranslationResponse {
 }
 
 /// AI聊天请求消息
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
@@ -82,7 +82,7 @@ pub struct ChatStreamDelta {
 pub struct AITranslator {
     client: Client,
     config: TranslatorConfig,
-    default_platform: Arc<Mutex<Option<AIPlatform>>>,
+    default_platform: Option<AIPlatform>,
 }
 
 impl AITranslator {
@@ -94,24 +94,19 @@ impl AITranslator {
                 .build()
                 .unwrap(),
             config: config.unwrap_or_default(),
-            default_platform: Arc::new(Mutex::new(None)),
+            default_platform: None,
         }
     }
 
-    /// 设置默认AI平台
-    pub async fn set_default_platform(&self, platform: Option<AIPlatform>) {
-        eprintln!("[AI] 设置默认AI平台: {:?}", platform);
-        let mut default_platform = self.default_platform.lock().await;
-        *default_platform = platform;
-        eprintln!("[AI] 默认AI平台设置完成");
+    /// 设置默认AI平台（返回新的实例，不影响原实例）
+    pub fn with_default_platform(mut self, platform: Option<AIPlatform>) -> Self {
+        self.default_platform = platform;
+        self
     }
 
     /// 获取默认AI平台
-    pub async fn get_default_platform(&self) -> Option<AIPlatform> {
-        let default_platform = self.default_platform.lock().await;
-        let platform = default_platform.clone();
-        eprintln!("[AI] 获取默认AI平台: {:?}", platform);
-        platform
+    pub fn get_default_platform(&self) -> &Option<AIPlatform> {
+        &self.default_platform
     }
 
     /// 翻译文本
@@ -128,7 +123,7 @@ impl AITranslator {
         
         // 获取默认AI平台
         eprintln!("[AI] 开始获取默认AI平台...");
-        let platform = self.get_default_platform().await;
+        let platform = self.get_default_platform().clone();
         if platform.is_none() {
             eprintln!("[AI] 错误: 没有配置默认AI平台");
             return Err("No default AI platform configured".into());
@@ -291,6 +286,16 @@ impl AITranslator {
         Ok((translated_title, translated_content))
     }
 
+    /// 查找缓冲区中的换行符位置
+    fn find_newline(buffer: &[u8]) -> Option<usize> {
+        for (i, &byte) in buffer.iter().enumerate() {
+            if byte == b'\n' {
+                return Some(i);
+            }
+        }
+        None
+    }
+
     /// 流式聊天
     pub async fn chat_completion_stream(
         &self,
@@ -299,13 +304,14 @@ impl AITranslator {
         temperature: Option<f32>,
         tx: mpsc::Sender<String>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let platform = self.get_default_platform().await;
+        let platform = self.get_default_platform().clone();
         if platform.is_none() {
+            eprintln!("[AI] 错误: 没有配置默认AI平台");
             return Err("No default AI platform configured".into());
         }
         let platform = platform.unwrap();
+        eprintln!("[AI] 开始流式聊天请求，平台: {}", platform.name);
 
-        // 构建聊天请求
         let chat_request = ChatRequest {
             model: platform.api_model,
             messages,
@@ -314,7 +320,6 @@ impl AITranslator {
             stream: true,
         };
 
-        // 发送请求
         let response = self.client
             .post(&platform.api_url)
             .header("Authorization", format!("Bearer {}", platform.api_key))
@@ -323,37 +328,77 @@ impl AITranslator {
             .send()
             .await?;
 
-        // 处理流式响应
-        let bytes = response.bytes().await?;
-        let content = String::from_utf8_lossy(&bytes);
-        let lines: Vec<&str> = content.split("\n").collect();
-        
-        // 处理每一行
-        for line in &lines {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with("data: [DONE]") {
-                continue;
-            }
+        eprintln!("[AI] API响应状态: {:?}", response.status());
 
-            // 提取JSON数据
-            if let Some(json_str) = line.strip_prefix("data: ") {
-                match serde_json::from_str::<ChatStreamResponse>(json_str) {
-                    Ok(response) => {
-                        for choice in response.choices {
-                            if let Some(content) = choice.delta.content {
-                                // 发送内容片段
-                                tx.send(content).await?;
+        let mut stream = response.bytes_stream();
+        let mut buffer = Vec::new();
+        let mut total_received = 0;
+        let mut total_sent = 0;
+
+        eprintln!("[AI] 开始接收流式数据...");
+
+        while let Some(chunk_result) = futures::StreamExt::next(&mut stream).await {
+            let chunk = chunk_result?;
+            total_received += chunk.len();
+            eprintln!("[AI] 收到数据块: {} 字节, 累计: {}", chunk.len(), total_received);
+
+            buffer.extend_from_slice(&chunk);
+
+            loop {
+                let newline_pos = Self::find_newline(&buffer);
+
+                if let Some(pos) = newline_pos {
+                    // 先复制数据，避免借用冲突
+                    let line_bytes = buffer[..pos].to_vec();
+                    buffer.drain(..pos + 1);
+
+                    let line = String::from_utf8_lossy(&line_bytes);
+                    let trimmed_line = line.trim();
+                    if trimmed_line.is_empty() {
+                        continue;
+                    }
+
+                    eprintln!("[AI] 处理行: {} 字节", line.len());
+
+                    if trimmed_line == "data: [DONE]" {
+                        eprintln!("[AI] 收到结束标记，流式完成。共发送: {} 个片段", total_sent);
+                        return Ok(());
+                    }
+
+                    if let Some(json_str) = trimmed_line.strip_prefix("data: ") {
+                        match serde_json::from_str::<ChatStreamResponse>(json_str) {
+                            Ok(stream_response) => {
+                                for choice in stream_response.choices {
+                                    if let Some(content) = choice.delta.content {
+                                        match tx.send(content.clone()).await {
+                                            Ok(_) => {
+                                                total_sent += 1;
+                                                // 添加短暂延迟，避免发送过快导致前端无法响应
+                                                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                                            }
+                                            Err(e) => {
+                                                eprintln!("[AI] 发送内容片段失败: {}", e);
+                                                return Err(format!("Failed to send content: {}", e).into());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("[AI] 解析JSON失败: {}, 原始字符串长度: {}", e, json_str.len());
+                                if json_str.len() < 200 {
+                                    eprintln!("[AI] 原始字符串: {}", json_str);
+                                }
                             }
                         }
                     }
-                    Err(e) => {
-                        // 忽略解析错误，继续处理下一行
-                        eprintln!("Failed to parse stream response: {}", e);
-                    }
+                } else {
+                    break;
                 }
             }
         }
 
+        eprintln!("[AI] 流结束。共接收: {} 字节, 发送: {} 个片段", total_received, total_sent);
         Ok(())
     }
 
@@ -364,7 +409,7 @@ impl AITranslator {
         max_tokens: Option<u32>,
         temperature: Option<f32>,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        let platform = self.get_default_platform().await;
+        let platform = self.get_default_platform().clone();
         if platform.is_none() {
             return Err("No default AI platform configured".into());
         }
@@ -408,20 +453,20 @@ impl AITranslator {
 
 /// AI翻译器单例
 pub struct AITranslatorSingleton {
-    translator: Arc<Mutex<AITranslator>>,
+    translator: Arc<AITranslator>,
 }
 
 impl AITranslatorSingleton {
     /// 创建单例
     pub fn new() -> Self {
         Self {
-            translator: Arc::new(Mutex::new(AITranslator::new(None))),
+            translator: Arc::new(AITranslator::new(None)),
         }
     }
 
-    /// 获取翻译器实例
-    pub async fn get_translator(&self) -> tokio::sync::MutexGuard<'_, AITranslator> {
-        self.translator.lock().await
+    /// 获取翻译器实例（返回克隆副本，支持并行操作）
+    pub async fn get_translator(&self) -> AITranslator {
+        (*self.translator).clone()
     }
 }
 

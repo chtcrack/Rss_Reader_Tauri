@@ -1,6 +1,6 @@
 use crate::models::{Article, Feed, FeedGroup, AIPlatform};
 use rusqlite::{Connection, Result, params};
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{TimeZone, Utc};
 use std::path::PathBuf;
 use opml::{Outline, OPML};
 
@@ -999,6 +999,30 @@ impl DbManager {
              FROM ai_platforms WHERE is_default = TRUE"
         )?;
         let platform = stmt.query_row([], |row| {
+            Ok(AIPlatform {
+                id: row.get::<_, i64>(0)?,
+                name: row.get(1)?,
+                api_url: row.get(2)?,
+                api_key: row.get(3)?,
+                api_model: row.get(4)?,
+                is_default: row.get(5)?,
+            })
+        });
+        
+        match platform {
+            Ok(platform) => Ok(Some(platform)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+    
+    /// 根据ID获取AI平台
+    pub fn get_ai_platform_by_id(&self, id: i64) -> Result<Option<AIPlatform>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, api_url, api_key, api_model, is_default 
+             FROM ai_platforms WHERE id = ?"
+        )?;
+        let platform = stmt.query_row(params![id], |row| {
             Ok(AIPlatform {
                 id: row.get::<_, i64>(0)?,
                 name: row.get(1)?,

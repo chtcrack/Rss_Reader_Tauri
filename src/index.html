@@ -25,6 +25,7 @@
         <div class="header-right">
           <button id="theme-toggle">🌙</button>
           <button id="refresh-btn">🔄</button>
+          <button id="ai-chat-btn">🤖AI聊天</button>
           <button id="settings-btn">⚙️</button>
         </div>
       </header>
@@ -371,6 +372,41 @@
         <div class="form-actions">
           <button id="confirm-delete-ai-platform" class="danger">删除</button>
           <button type="button" class="cancel">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- AI聊天窗口 -->
+    <div id="ai-chat-modal" class="modal ai-chat-modal">
+      <div class="modal-content ai-chat-content">
+        <div class="ai-chat-header">
+          <h2>AI聊天</h2>
+          <div class="ai-chat-actions">
+            <button id="clear-chat-btn">🗑️ 清除记录</button>
+            <span class="close">&times;</span>
+          </div>
+        </div>
+        <div class="ai-chat-main">
+          <!-- 左侧：AI平台选择 -->
+          <div class="ai-platform-selector">
+            <h3>AI平台</h3>
+            <select id="ai-platform-select">
+              <!-- 动态生成AI平台选项 -->
+            </select>
+          </div>
+          
+          <!-- 中间：聊天消息区 -->
+          <div class="ai-chat-messages" id="ai-chat-messages">
+            <!-- 动态生成聊天消息 -->
+          </div>
+        </div>
+        
+        <!-- 底部：输入区 -->
+        <div class="ai-chat-input-area">
+          <textarea id="ai-chat-input" placeholder="输入您的问题..." rows="3"></textarea>
+          <div class="ai-chat-input-actions">
+            <button id="send-chat-btn" class="send-btn">发送</button>
+          </div>
         </div>
       </div>
     </div>

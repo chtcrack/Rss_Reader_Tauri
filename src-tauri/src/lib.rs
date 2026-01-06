@@ -1,5 +1,4 @@
 use std::fs;
-use std::path::PathBuf;
 use tauri::{State, Emitter, Manager, async_runtime::Mutex};
 use tauri_plugin_opener::OpenerExt;
 use serde::{Deserialize, Serialize};
@@ -64,7 +63,7 @@ async fn init_ai_translator(app_state: State<'_, AppState>) -> Result<(), String
     eprintln!("[AI] ===== 开始初始化AI翻译器 =====");
     // 获取默认AI平台
     let default_platform = {
-            let db_manager = app_state.db_manager.lock().await;
+        let db_manager = app_state.db_manager.lock().await;
         eprintln!("[AI] 成功锁定数据库管理器");
         
         // 先获取所有AI平台，查看是否有平台配置
@@ -82,14 +81,12 @@ async fn init_ai_translator(app_state: State<'_, AppState>) -> Result<(), String
         platform
     };
     
-    // 设置默认AI平台到全局翻译器
-    let translator = AI_TRANSLATOR.get_translator().await;
-    eprintln!("[AI] 成功获取全局翻译器实例");
-    translator.set_default_platform(default_platform.clone()).await;
-    eprintln!("[AI] 成功设置默认AI平台到全局翻译器: {:?}", default_platform);
+    // 创建带有默认AI平台的新翻译器实例
+    let translator = AI_TRANSLATOR.get_translator().await.with_default_platform(default_platform.clone());
+    eprintln!("[AI] 成功创建翻译器实例并设置默认AI平台: {:?}", default_platform);
     
     // 验证设置是否成功
-    let verify_platform = translator.get_default_platform().await;
+    let verify_platform = translator.get_default_platform().clone();
     eprintln!("[AI] 验证默认AI平台设置: {:?}", verify_platform);
     eprintln!("[AI] ===== AI翻译器初始化完成 =====");
     
@@ -139,15 +136,35 @@ async fn update_single_feed(app: tauri::AppHandle, app_state: State<'_, AppState
                 }
             }
             
+            // 保存不需要翻译的文章
+            let mut new_article_count = 0;
+            for article in articles_to_save {
+                let db_manager = app_state.db_manager.lock().await;
+                
+                if let Ok(true) = db_manager.add_article(&article) {
+                    new_article_count += 1;
+                }
+            }
+            
             // 翻译需要翻译的文章
             if !articles_to_translate.is_empty() && feed.translate_enabled {
                 eprintln!("[AI] ===== 开始翻译RSS源 {} 的文章 ======", feed.name);
                 eprintln!("[AI] 需要翻译的文章数量: {}", articles_to_translate.len());
                 
-                // 获取AI翻译器实例
-                let translator = AI_TRANSLATOR.get_translator().await;
+                // 从数据库获取默认AI平台
+                let default_platform = {
+                    let db_manager = app_state.db_manager.lock().await;
+                    db_manager.get_default_ai_platform().map_err(|e| {
+                        eprintln!("Failed to get default AI platform from database: {}", e);
+                        format!("Failed to get default AI platform: {}", e)
+                    })?
+                };
                 
-                // 遍历需要翻译的文章，进行翻译
+                // 获取AI翻译器实例并设置默认平台
+                let translator = AI_TRANSLATOR.get_translator().await
+                    .with_default_platform(default_platform);
+                
+                // 遍历需要翻译的文章，进行翻译并实时保存
                 for (index, article) in articles_to_translate.iter_mut().enumerate() {
                     eprintln!("[AI] 开始翻译第 {} 篇文章: {}", index + 1, article.title);
                     eprintln!("[AI] 文章内容长度: {}", article.content.len());
@@ -172,21 +189,14 @@ async fn update_single_feed(app: tauri::AppHandle, app_state: State<'_, AppState
                         }
                     }
                     eprintln!("[AI] 完成第 {} 篇文章翻译", index + 1);
+                    
+                    // 翻译完成后立即保存到数据库，然后释放锁
+                    let db_manager = app_state.db_manager.lock().await;
+                    if let Ok(true) = db_manager.add_article(&article) {
+                        new_article_count += 1;
+                    }
                 }
                 eprintln!("[AI] ===== 完成RSS源 {} 的文章翻译 ======", feed.name);
-                
-                // 将翻译后的文章添加到保存列表
-                articles_to_save.extend(articles_to_translate);
-            }
-            
-            // 保存所有文章到数据库，每篇文章独立获取和释放锁
-            let mut new_article_count = 0;
-            for article in articles_to_save {
-                let db_manager = app_state.db_manager.lock().await;
-                
-                if let Ok(true) = db_manager.add_article(&article) {
-                    new_article_count += 1;
-                }
             }
             
             println!("更新完成: {} 新增 {} 篇文章", feed.name, new_article_count);
@@ -236,49 +246,75 @@ async fn add_feed(app: tauri::AppHandle, app_state: State<'_, AppState>, feed: F
         
         // 更新RSS源
         let rss_updater = RssUpdater::new();
-        match rss_updater.update_feed(&new_feed).await {
-            Ok(mut articles) => {
-                // 获取应用实例和状态
-                if let Some(window) = app_clone.get_webview_window("main") {
-                    let app_handle = window.app_handle();
-                    let app_state = app_handle.state::<AppState>();
+        let result = rss_updater.update_feed(&new_feed).await;
+        
+        // 处理更新结果
+        if let Ok(mut articles) = result {
+            // 获取应用实例和状态
+            if let Some(window) = app_clone.get_webview_window("main") {
+                let app_handle = window.app_handle();
+                let app_state = app_handle.state::<AppState>();
+                
+                // 检查哪些文章需要翻译
+                let mut articles_to_translate = Vec::new();
+                let mut articles_to_save = Vec::new();
+                
+                // 获取数据库锁并筛选需要翻译的文章
+                {
+                    let db_manager = app_state.db_manager.lock().await;
                     
-                    // 检查哪些文章需要翻译
-                    let mut articles_to_translate = Vec::new();
-                    let mut articles_to_save = Vec::new();
-                    
-                    {
-                        let db_manager = app_state.db_manager.lock().await;
-                        
-                        // 筛选需要翻译的文章
-                        for article in articles {
-                            if new_feed.translate_enabled {
-                                if let Ok(needs_translation) = db_manager.article_needs_translation(article.feed_id, &article.link) {
-                                    if needs_translation {
-                                        articles_to_translate.push(article.clone());
-                                    } else {
-                                        articles_to_save.push(article);
-                                    }
-                                } else {
-                                    // 查询失败，默认需要翻译
-                                    articles_to_translate.push(article.clone());
-                                }
+                    // 筛选需要翻译的文章
+                    for article in articles {
+                        if new_feed.translate_enabled {
+                            // 检查文章是否需要翻译
+                            let needs_translation = db_manager.article_needs_translation(article.feed_id, &article.link).unwrap_or(true);
+                            
+                            if needs_translation {
+                                articles_to_translate.push(article.clone());
                             } else {
-                                // 未启用翻译，直接保存
                                 articles_to_save.push(article);
                             }
+                        } else {
+                            // 未启用翻译，直接保存
+                            articles_to_save.push(article);
                         }
                     }
+                }
+                
+                // 保存不需要翻译的文章
+                let mut new_article_count = 0;
+                for article in articles_to_save {
+                    let db_manager = app_state.db_manager.lock().await;
                     
-                    // 翻译需要翻译的文章
-                    if !articles_to_translate.is_empty() && new_feed.translate_enabled {
-                        eprintln!("[AI] ===== 开始翻译RSS源 {} 的文章 ======", new_feed.name);
-                        eprintln!("[AI] 需要翻译的文章数量: {}", articles_to_translate.len());
+                    if let Ok(true) = db_manager.add_article(&article) {
+                        new_article_count += 1;
+                    }
+                }
+                
+                // 翻译需要翻译的文章
+                if !articles_to_translate.is_empty() && new_feed.translate_enabled {
+                    eprintln!("[AI] ===== 开始翻译RSS源 {} 的文章 ======", new_feed.name);
+                    eprintln!("[AI] 需要翻译的文章数量: {}", articles_to_translate.len());
+                    
+                    // 从数据库获取默认AI平台
+                    let default_platform = {
+                        let db_manager = app_state.db_manager.lock().await;
+                        match db_manager.get_default_ai_platform() {
+                            Ok(platform) => platform,
+                            Err(e) => {
+                                eprintln!("Failed to get default AI platform from database: {}", e);
+                                None
+                            }
+                        }
+                    };
+                    
+                    // 如果有默认平台，进行翻译
+                    if let Some(platform) = default_platform {
+                        // 获取AI翻译器实例并设置默认平台
+                        let translator = AI_TRANSLATOR.get_translator().await
+                            .with_default_platform(Some(platform));
                         
-                        // 获取AI翻译器实例
-                        let translator = AI_TRANSLATOR.get_translator().await;
-                        
-                        // 遍历需要翻译的文章，进行翻译
+                        // 遍历需要翻译的文章，进行翻译并实时保存
                         for (index, article) in articles_to_translate.iter_mut().enumerate() {
                             eprintln!("[AI] 开始翻译第 {} 篇文章: {}", index + 1, article.title);
                             eprintln!("[AI] 文章内容长度: {}", article.content.len());
@@ -303,38 +339,41 @@ async fn add_feed(app: tauri::AppHandle, app_state: State<'_, AppState>, feed: F
                                 }
                             }
                             eprintln!("[AI] 完成第 {} 篇文章翻译", index + 1);
+                            
+                            // 翻译完成后立即保存到数据库，然后释放锁
+                            let db_manager = app_state.db_manager.lock().await;
+                            if let Ok(true) = db_manager.add_article(&article) {
+                                new_article_count += 1;
+                            }
                         }
                         eprintln!("[AI] ===== 完成RSS源 {} 的文章翻译 ======", new_feed.name);
-                        
-                        // 将翻译后的文章添加到保存列表
-                        articles_to_save.extend(articles_to_translate);
-                    }
-                    
-                    // 保存新文章到数据库，每篇文章独立获取和释放锁
-                    let mut new_article_count = 0;
-                    for article in articles_to_save {
-                        let db_manager = app_state.db_manager.lock().await;
-                        
-                        if let Ok(true) = db_manager.add_article(&article) {
-                            new_article_count += 1;
+                    } else {
+                        // 如果没有默认平台，直接保存未翻译的文章
+                        eprintln!("[AI] 错误: 没有配置默认AI平台");
+                        // 保存未翻译的文章，每篇独立获取和释放锁
+                        for article in articles_to_translate {
+                            let db_manager = app_state.db_manager.lock().await;
+                            if let Ok(true) = db_manager.add_article(&article) {
+                                new_article_count += 1;
+                            }
                         }
                     }
-                    
-                    println!("更新完成: {} 新增 {} 篇文章", new_feed.name, new_article_count);
                 }
                 
-                // 发布feed_updated事件，通知前端更新完成
-                if let Err(e) = app_clone.emit("feed_updated", Some(new_feed.id)) {
-                    eprintln!("Failed to emit feed_updated event: {}", e);
-                }
-            },
-            Err(e) => {
-                eprintln!("Failed to update feed {}: {}", new_feed.name, e);
-                
-                // 即使更新失败，也通知前端，以便清除加载状态
-                if let Err(e) = app_clone.emit("feed_updated", Some(new_feed.id)) {
-                    eprintln!("Failed to emit feed_updated event: {}", e);
-                }
+                println!("更新完成: {} 新增 {} 篇文章", new_feed.name, new_article_count);
+            }
+            
+            // 发布feed_updated事件，通知前端更新完成
+            if let Err(e) = app_clone.emit("feed_updated", Some(new_feed.id)) {
+                eprintln!("Failed to emit feed_updated event: {}", e);
+            }
+        } else if let Err(e) = result {
+            // 更新失败的情况
+            eprintln!("Failed to update feed {}: {}", new_feed.name, e);
+            
+            // 即使更新失败，也通知前端，以便清除加载状态
+            if let Err(e) = app_clone.emit("feed_updated", Some(new_feed.id)) {
+                eprintln!("Failed to emit feed_updated event: {}", e);
             }
         }
     });
@@ -623,9 +662,8 @@ async fn set_default_ai_platform(app_state: State<'_, AppState>, platform_id: i6
         })?
     };
     
-    // 更新全局AI翻译器的默认平台
-    let translator = AI_TRANSLATOR.get_translator().await;
-    translator.set_default_platform(new_default_platform).await;
+    // 创建新的翻译器实例并设置默认平台（不影响正在进行的其他操作）
+    let _translator = AI_TRANSLATOR.get_translator().await.with_default_platform(new_default_platform);
     
     Ok(())
 }
@@ -663,6 +701,68 @@ async fn update_update_interval(interval: u64) -> Result<(), String> {
     })?;
     
     Ok(())
+}
+
+// Tauri命令：AI聊天（流式）
+#[tauri::command(async)]
+async fn ai_chat(
+    app: tauri::AppHandle,
+    app_state: State<'_, AppState>,
+    messages: Vec<crate::ai_translator::ChatMessage>,
+    max_tokens: Option<u32>,
+    temperature: Option<f32>,
+    platform_id: Option<i64>,
+) -> Result<(), String> {
+    // 获取AI翻译器实例
+    let mut translator = AI_TRANSLATOR.get_translator().await;
+    
+    // 根据platform_id获取AI平台，优先级：指定平台 > 默认平台
+    let selected_platform = if let Some(platform_id) = platform_id {
+        // 使用指定的平台
+        let db_manager = app_state.db_manager.lock().await;
+        db_manager.get_ai_platform_by_id(platform_id).map_err(|e| {
+            eprintln!("Failed to get AI platform by id: {}", e);
+            format!("Failed to get AI platform: {}", e)
+        })?
+    } else {
+        // 使用默认平台
+        let db_manager = app_state.db_manager.lock().await;
+        db_manager.get_default_ai_platform().map_err(|e| {
+            eprintln!("Failed to get default AI platform from database: {}", e);
+            format!("Failed to get default AI platform: {}", e)
+        })?
+    };
+    
+    // 设置指定的AI平台到翻译器实例（仅用于当前聊天会话，不修改全局默认设置）
+    translator = translator.with_default_platform(selected_platform);
+    
+    // 创建通道用于接收流式响应
+    let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+    
+    // 克隆app_handle用于事件发送
+    let app_handle = app.clone();
+    
+    // 启动异步任务处理聊天响应
+    tokio::spawn(async move {
+        // 处理流式响应
+        while let Some(content) = rx.recv().await {
+            // 发送事件给前端
+            if let Err(e) = app_handle.emit("ai_chat_response", content) {
+                eprintln!("Failed to emit ai_chat_response event: {}", e);
+            }
+        }
+        // 发送结束事件
+        let _ = app_handle.emit("ai_chat_end", ());
+    });
+    
+    // 调用AI翻译器的聊天函数
+    match translator.chat_completion_stream(messages, max_tokens, temperature, tx).await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            eprintln!("Failed to call chat_completion_stream: {}", e);
+            Err(format!("AI chat failed: {}", e))
+        }
+    }
 }
 
 // 异步Tauri命令：更新所有RSS源
@@ -805,47 +905,7 @@ async fn auto_update_feeds_task(app_handle: tauri::AppHandle) {
                             }
                         }
                         
-                        // 翻译需要翻译的文章
-                        if !articles_to_translate.is_empty() && feed.translate_enabled {
-                            eprintln!("[AI] ===== 开始翻译RSS源 {} 的文章 ======", feed.name);
-                            eprintln!("[AI] 需要翻译的文章数量: {}", articles_to_translate.len());
-                            
-                            // 获取AI翻译器实例
-                            let translator = AI_TRANSLATOR.get_translator().await;
-                            
-                            // 遍历需要翻译的文章，进行翻译
-                            for (index, article) in articles_to_translate.iter_mut().enumerate() {
-                                eprintln!("[AI] 开始翻译第 {} 篇文章: {}", index + 1, article.title);
-                                eprintln!("[AI] 文章内容长度: {}", article.content.len());
-                                
-                                match translator.translate_rss_content(
-                                    &article.title,
-                                    &article.content,
-                                    "zh-CN",  // 默认翻译为中文
-                                ).await {
-                                    Ok((translated_title, translated_content)) => {
-                                        // 翻译成功，更新文章字段
-                                        eprintln!("[AI] 成功翻译文章标题: {}", translated_title);
-                                        eprintln!("[AI] 翻译后内容长度: {}", translated_content.len());
-                                        article.translated_title = Some(translated_title);
-                                        article.translated_content = Some(translated_content);
-                                    },
-                                    Err(e) => {
-                                        // 翻译失败，记录错误但不影响整体更新
-                                        eprintln!("[AI] 翻译文章 {} 失败: {}", article.title, e);
-                                        eprintln!("[AI] 错误详情: {:?}", e);
-                                        // 保持translated_title和translated_content为None
-                                    }
-                                }
-                                eprintln!("[AI] 完成第 {} 篇文章翻译", index + 1);
-                            }
-                            eprintln!("[AI] ===== 完成RSS源 {} 的文章翻译 ======", feed.name);
-                            
-                            // 将翻译后的文章添加到保存列表
-                            articles_to_save.extend(articles_to_translate);
-                        }
-                        
-                        // 保存新文章，每篇文章独立获取和释放锁
+                        // 保存不需要翻译的文章
                         for article in articles_to_save {
                             let db_manager = app_state.db_manager.lock().await;
                             match db_manager.add_article(&article) {
@@ -858,6 +918,90 @@ async fn auto_update_feeds_task(app_handle: tauri::AppHandle) {
                                 Err(e) => {
                                     eprintln!("Failed to add article: {}", e);
                                 }
+                            }
+                        }
+                        
+                        // 翻译需要翻译的文章
+                        if !articles_to_translate.is_empty() && feed.translate_enabled {
+                            eprintln!("[AI] ===== 开始翻译RSS源 {} 的文章 ======", feed.name);
+                            eprintln!("[AI] 需要翻译的文章数量: {}", articles_to_translate.len());
+                            
+                            // 从数据库获取默认AI平台
+                            let default_platform = {
+                                let db_manager = app_state.db_manager.lock().await;
+                                match db_manager.get_default_ai_platform() {
+                                    Ok(platform) => platform,
+                                    Err(e) => {
+                                        eprintln!("Failed to get default AI platform from database: {}", e);
+                                        None
+                                    }
+                                }
+                            };
+                            
+                            // 如果没有默认平台，直接保存未翻译的文章
+                            if default_platform.is_none() {
+                                eprintln!("[AI] 错误: 没有配置默认AI平台");
+                                // 保存未翻译的文章，每篇独立获取和释放锁
+                                for article in articles_to_translate {
+                                    let db_manager = app_state.db_manager.lock().await;
+                                    match db_manager.add_article(&article) {
+                                        Ok(true) => {
+                                            println!("New article from {}: {}", feed.name, article.title);
+                                        }
+                                        Ok(false) => {
+                                            // 文章已存在，忽略
+                                        }
+                                        Err(e) => {
+                                            eprintln!("Failed to add article: {}", e);
+                                        }
+                                    }
+                                }
+                            } else {
+                                // 获取AI翻译器实例并设置默认平台
+                                let translator = AI_TRANSLATOR.get_translator().await
+                                    .with_default_platform(default_platform);
+                                
+                                // 遍历需要翻译的文章，进行翻译并实时保存
+                                for (index, article) in articles_to_translate.iter_mut().enumerate() {
+                                    eprintln!("[AI] 开始翻译第 {} 篇文章: {}", index + 1, article.title);
+                                    eprintln!("[AI] 文章内容长度: {}", article.content.len());
+                                    
+                                    match translator.translate_rss_content(
+                                        &article.title,
+                                        &article.content,
+                                        "zh-CN",  // 默认翻译为中文
+                                    ).await {
+                                        Ok((translated_title, translated_content)) => {
+                                            // 翻译成功，更新文章字段
+                                            eprintln!("[AI] 成功翻译文章标题: {}", translated_title);
+                                            eprintln!("[AI] 翻译后内容长度: {}", translated_content.len());
+                                            article.translated_title = Some(translated_title);
+                                            article.translated_content = Some(translated_content);
+                                        },
+                                        Err(e) => {
+                                            // 翻译失败，记录错误但不影响整体更新
+                                            eprintln!("[AI] 翻译文章 {} 失败: {}", article.title, e);
+                                            eprintln!("[AI] 错误详情: {:?}", e);
+                                            // 保持translated_title和translated_content为None
+                                        }
+                                    }
+                                    eprintln!("[AI] 完成第 {} 篇文章翻译", index + 1);
+                                    
+                                    // 翻译完成后立即保存到数据库，然后释放锁
+                                    let db_manager = app_state.db_manager.lock().await;
+                                    match db_manager.add_article(&article) {
+                                        Ok(true) => {
+                                            println!("New translated article from {}: {}", feed.name, article.title);
+                                        }
+                                        Ok(false) => {
+                                            // 文章已存在，忽略
+                                        }
+                                        Err(e) => {
+                                            eprintln!("Failed to add translated article: {}", e);
+                                        }
+                                    }
+                                }
+                                eprintln!("[AI] ===== 完成RSS源 {} 的文章翻译 ======", feed.name);
                             }
                         }
                     },
@@ -1125,7 +1269,8 @@ pub fn run() {
             delete_articles,
             delete_article,
             open_link,
-            update_update_interval
+            update_update_interval,
+            ai_chat
         ))
         .run(tauri::generate_context!())
         .expect("Error running app");
