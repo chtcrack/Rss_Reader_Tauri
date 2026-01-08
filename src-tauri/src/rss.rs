@@ -352,22 +352,29 @@ impl RssUpdater {
         
         let mut last_error: Option<Box<dyn std::error::Error + Send + Sync>> = None;
         
+        println!("开始更新RSS源: {} ({})", feed.name, feed.url);
+        
         // 尝试获取RSS内容，支持重试
         for attempt in 0..=MAX_RETRIES {
             match self.attempt_update_feed(feed).await {
                 Ok(articles) => {
-                    // 更新成功，返回文章列表
+                    println!("成功更新RSS源: {}，获取到 {} 篇文章", feed.name, articles.len());
                     return Ok(articles);
                 },
                 Err(e) => {
+                    // 详细的错误日志
+                    eprintln!("更新RSS源 {} 失败 (尝试 {}/{})", 
+                        feed.name, attempt + 1, MAX_RETRIES + 1);
+                    eprintln!("  URL: {}", feed.url);
+                    eprintln!("  错误类型: {}", std::any::type_name::<dyn std::error::Error + Send + Sync>());
+                    eprintln!("  错误信息: {}", e);
+                    
                     // 记录错误
                     last_error = Some(e);
                     
                     // 如果不是最后一次尝试，等待一段时间后重试
                     if attempt < MAX_RETRIES {
-                        eprintln!("更新RSS源 {} 失败，{}秒后重试 (尝试 {}/{})", 
-                            feed.name, RETRY_DELAY.as_secs(), attempt + 1, MAX_RETRIES + 1);
-                        eprintln!("错误信息: {}", last_error.as_ref().unwrap());
+                        eprintln!("  {}秒后重试...", RETRY_DELAY.as_secs());
                         tokio::time::sleep(RETRY_DELAY).await;
                     }
                 }
@@ -375,23 +382,27 @@ impl RssUpdater {
         }
         
         // 所有尝试都失败，返回最后一次错误
-        Err(last_error.unwrap())
+        let error = last_error.unwrap();
+        eprintln!("所有尝试更新RSS源 {} 都失败了", feed.name);
+        Err(error)
     }
     
     /// 单次尝试更新RSS源
     async fn attempt_update_feed(&self, feed: &Feed) -> Result<Vec<Article>, Box<dyn std::error::Error + Send + Sync>> {
         // 使用reqwest获取内容
+        println!("  正在获取RSS内容: {}", feed.url);
         let content = self.reqwest_fetcher.fetch(&feed.url).await?;
+        println!("  成功获取RSS内容，大小: {} 字节", content.len());
 
         // 解析RSS或Atom内容，传递feed.url作为base_url
+        println!("  正在解析RSS内容...");
         let mut articles = self.parser.parse(&content, &feed.url)?;
+        println!("  成功解析RSS内容，找到 {} 篇文章", articles.len());
         
         // 设置feed_id
         for article in &mut articles {
             article.feed_id = feed.id;
         }
-
-        // 翻译逻辑已移至lib.rs中的命令处理函数，在保存文章前检查是否需要翻译
 
         Ok(articles)
     }
@@ -399,7 +410,10 @@ impl RssUpdater {
     /// 并发更新多个RSS源
     pub async fn update_feeds(&self, feeds: &[Feed]) -> Vec<Result<(Feed, Vec<Article>), Box<dyn std::error::Error + Send + Sync>>>
     {
-        let mut tasks = Vec::new();
+        let total_feeds = feeds.len();
+        println!("开始并发更新 {} 个RSS源", total_feeds);
+        
+        let mut tasks = Vec::with_capacity(total_feeds);
 
         for feed in feeds {
             let feed_clone = feed.clone();
@@ -410,14 +424,29 @@ impl RssUpdater {
             }));
         }
 
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(total_feeds);
+        let mut success_count = 0;
+        let mut failure_count = 0;
+        
         for task in tasks {
             match task.await {
-                Ok((feed, Ok(articles))) => results.push(Ok((feed, articles))),
-                Ok((_feed, Err(e))) => results.push(Err(e)),
-                Err(e) => results.push(Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>)),
+                Ok((feed, Ok(articles))) => {
+                    success_count += 1;
+                    results.push(Ok((feed, articles)));
+                },
+                Ok((feed, Err(e))) => {
+                    failure_count += 1;
+                    results.push(Err(e));
+                },
+                Err(e) => {
+                    failure_count += 1;
+                    results.push(Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>));
+                },
             }
         }
+        
+        println!("并发更新完成: {} 成功, {} 失败, 总计 {}", 
+            success_count, failure_count, total_feeds);
 
         results
     }

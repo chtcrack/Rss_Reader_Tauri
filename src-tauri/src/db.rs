@@ -1,6 +1,6 @@
 use crate::models::{Article, Feed, FeedGroup, AIPlatform};
 use rusqlite::{Connection, Result, params};
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use std::path::PathBuf;
 use opml::{Outline, OPML};
 
@@ -92,6 +92,38 @@ impl DbManager {
         if !Self::column_exists(conn, "feeds", "translate_enabled")? {
             conn.execute(
                 "ALTER TABLE feeds ADD COLUMN translate_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+                [],
+            )?;
+        }
+
+        // 为现有数据库添加last_update_status列（如果不存在）
+        if !Self::column_exists(conn, "feeds", "last_update_status")? {
+            conn.execute(
+                "ALTER TABLE feeds ADD COLUMN last_update_status TEXT",
+                [],
+            )?;
+        }
+        
+        // 为现有数据库添加update_attempts列（如果不存在）
+        if !Self::column_exists(conn, "feeds", "update_attempts")? {
+            conn.execute(
+                "ALTER TABLE feeds ADD COLUMN update_attempts INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        
+        // 为现有数据库添加next_retry_time列（如果不存在）
+        if !Self::column_exists(conn, "feeds", "next_retry_time")? {
+            conn.execute(
+                "ALTER TABLE feeds ADD COLUMN next_retry_time INTEGER",
+                [],
+            )?;
+        }
+        
+        // 为现有数据库添加notification_enabled列（如果不存在）
+        if !Self::column_exists(conn, "feeds", "notification_enabled")? {
+            conn.execute(
+                "ALTER TABLE feeds ADD COLUMN notification_enabled BOOLEAN NOT NULL DEFAULT TRUE",
                 [],
             )?;
         }
@@ -242,14 +274,15 @@ impl DbManager {
         let tx = self.conn.transaction()?;
         
         let id = tx.query_row(
-            r#"INSERT INTO feeds (name, url, group_id, last_updated, translate_enabled) 
-               VALUES (?, ?, ?, ?, ?) RETURNING id"#,
+            r#"INSERT INTO feeds (name, url, group_id, last_updated, translate_enabled, notification_enabled) 
+               VALUES (?, ?, ?, ?, ?, ?) RETURNING id"#,
             params![
                 feed.name.as_str(),
                 feed.url.as_str(),
                 group_id,
                 last_updated,
-                feed.translate_enabled
+                feed.translate_enabled,
+                feed.notification_enabled
             ],
             |row| row.get(0)
         )?;
@@ -262,9 +295,11 @@ impl DbManager {
 
     /// 获取所有RSS源
     pub fn get_all_feeds(&self) -> Result<Vec<Feed>> {
-        let mut stmt = self.conn.prepare("SELECT id, name, url, group_id, last_updated, translate_enabled FROM feeds ORDER BY name")?;
+        let mut stmt = self.conn.prepare("SELECT id, name, url, group_id, last_updated, translate_enabled, notification_enabled, last_update_status, update_attempts, next_retry_time FROM feeds ORDER BY name")?;
         let feeds = stmt.query_map([], |row| {
             let last_updated = row.get::<_, Option<i64>>(4)?
+                .map(|ts| Utc.timestamp(ts, 0));
+            let next_retry_time = row.get::<_, Option<i64>>(9)?
                 .map(|ts| Utc.timestamp(ts, 0));
             Ok(Feed {
                 id: row.get::<_, i64>(0)?,
@@ -273,6 +308,10 @@ impl DbManager {
                 group_id: row.get::<_, Option<i64>>(3)?,
                 last_updated,
                 translate_enabled: row.get(5)?,
+                notification_enabled: row.get(6)?,
+                last_update_status: row.get(7)?,
+                update_attempts: row.get(8)?,
+                next_retry_time,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -485,7 +524,7 @@ impl DbManager {
         let tx = self.conn.transaction()?;
         
         tx.execute(
-            r#"UPDATE feeds SET name = ?, url = ?, group_id = ?, last_updated = ?, translate_enabled = ? 
+            r#"UPDATE feeds SET name = ?, url = ?, group_id = ?, last_updated = ?, translate_enabled = ?, notification_enabled = ? 
                WHERE id = ?"#,
             params![
                 feed.name.as_str(),
@@ -493,8 +532,73 @@ impl DbManager {
                 feed.group_id,
                 last_updated,
                 feed.translate_enabled,
+                feed.notification_enabled,
                 feed.id
             ],
+        )?;
+        
+        // 提交事务
+        tx.commit()?;
+        
+        Ok(())
+    }
+    
+    /// 仅更新RSS源的最后更新时间
+    pub fn update_feed_last_updated(&mut self, feed_id: i64, last_updated: DateTime<Utc>) -> Result<()> {
+        let last_updated_ts = last_updated.timestamp();
+        
+        // 开始事务
+        let tx = self.conn.transaction()?;
+        
+        tx.execute(
+            r#"UPDATE feeds SET last_updated = ? WHERE id = ?"#,
+            params![last_updated_ts, feed_id],
+        )?;
+        
+        // 提交事务
+        tx.commit()?;
+        
+        Ok(())
+    }
+    
+    /// 更新RSS源的更新成功状态
+    pub fn update_feed_success(&mut self, feed_id: i64, last_updated: DateTime<Utc>) -> Result<()> {
+        let last_updated_ts = last_updated.timestamp();
+        
+        // 开始事务
+        let tx = self.conn.transaction()?;
+        
+        tx.execute(
+            r#"UPDATE feeds SET last_updated = ?, last_update_status = 'success', update_attempts = 0, next_retry_time = NULL WHERE id = ?"#,
+            params![last_updated_ts, feed_id],
+        )?;
+        
+        // 提交事务
+        tx.commit()?;
+        
+        Ok(())
+    }
+    
+    /// 更新RSS源的更新失败状态，并计算下次重试时间
+    pub fn update_feed_failure(&mut self, feed_id: i64, error_message: &str) -> Result<()> {
+        // 获取当前尝试次数
+        let current_attempts: i32 = self.conn.query_row(
+            r#"SELECT update_attempts FROM feeds WHERE id = ?"#,
+            params![feed_id],
+            |row| row.get(0),
+        )?;
+        
+        // 计算下次重试时间：使用指数退避策略
+        let retry_delay_seconds = 2_u64.pow(current_attempts as u32) * 60;
+        let next_retry_time = Utc::now() + chrono::Duration::seconds(retry_delay_seconds as i64);
+        let next_retry_time_ts = next_retry_time.timestamp();
+        
+        // 开始事务
+        let tx = self.conn.transaction()?;
+        
+        tx.execute(
+            r#"UPDATE feeds SET last_update_status = ?, update_attempts = update_attempts + 1, next_retry_time = ? WHERE id = ?"#,
+            params![error_message, next_retry_time_ts, feed_id],
         )?;
         
         // 提交事务
@@ -575,9 +679,11 @@ impl DbManager {
 
     /// 获取特定分组的RSS源
     pub fn get_feeds_by_group(&self, group_id: i64) -> Result<Vec<Feed>> {
-        let mut stmt = self.conn.prepare("SELECT id, name, url, group_id, last_updated, translate_enabled FROM feeds WHERE group_id = ? ORDER BY name")?;
+        let mut stmt = self.conn.prepare("SELECT id, name, url, group_id, last_updated, translate_enabled, notification_enabled, last_update_status, update_attempts, next_retry_time FROM feeds WHERE group_id = ? ORDER BY name")?;
         let feeds = stmt.query_map(params![group_id], |row| {
             let last_updated = row.get::<_, Option<i64>>(4)?
+                .map(|ts| Utc.timestamp_opt(ts, 0).unwrap());
+            let next_retry_time = row.get::<_, Option<i64>>(9)?
                 .map(|ts| Utc.timestamp_opt(ts, 0).unwrap());
             Ok(Feed {
                 id: row.get::<_, i64>(0)?,
@@ -586,6 +692,10 @@ impl DbManager {
                 group_id: row.get::<_, Option<i64>>(3)?,
                 last_updated,
                 translate_enabled: row.get(5)?,
+                notification_enabled: row.get(6)?,
+                last_update_status: row.get(7)?,
+                update_attempts: row.get(8)?,
+                next_retry_time,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -594,10 +704,12 @@ impl DbManager {
 
     /// 根据ID获取RSS源
     pub fn get_feed_by_id(&self, feed_id: i64) -> Result<Feed> {
-        let mut stmt = self.conn.prepare("SELECT id, name, url, group_id, last_updated, translate_enabled FROM feeds WHERE id = ?")?;
+        let mut stmt = self.conn.prepare("SELECT id, name, url, group_id, last_updated, translate_enabled, notification_enabled, last_update_status, update_attempts, next_retry_time FROM feeds WHERE id = ?")?;
         let feed = stmt.query_row(params![feed_id], |row| {
             let last_updated = row.get::<_, Option<i64>>(4)?
-                .map(|ts| Utc.timestamp(ts, 0));
+                .map(|ts| Utc.timestamp_opt(ts, 0).unwrap());
+            let next_retry_time = row.get::<_, Option<i64>>(9)?
+                .map(|ts| Utc.timestamp_opt(ts, 0).unwrap());
             Ok(Feed {
                 id: row.get::<_, i64>(0)?,
                 name: row.get(1)?,
@@ -605,6 +717,10 @@ impl DbManager {
                 group_id: row.get::<_, Option<i64>>(3)?,
                 last_updated,
                 translate_enabled: row.get(5)?,
+                notification_enabled: row.get(6)?,
+                last_update_status: row.get(7)?,
+                update_attempts: row.get(8)?,
+                next_retry_time,
             })
         })?;
         Ok(feed)
@@ -906,7 +1022,11 @@ impl DbManager {
                     url: xml_url.to_string(),
                     group_id: parent_group_id,
                     last_updated: None,
-                    translate_enabled: false, // 默认不启用翻译
+                    translate_enabled: false,
+                    notification_enabled: true, // 默认启用通知
+                    last_update_status: None,
+                    update_attempts: 0,
+                    next_retry_time: None,
                 };
                 
                 self.add_feed(&feed)?;

@@ -184,6 +184,7 @@ function initEventListeners() {
       
       try {
         const translateEnabled = document.getElementById('translate-enabled').checked;
+        const notificationEnabled = document.getElementById('notification-enabled').checked;
       
       const feed = {
           id: 0, // 数据库自动生成
@@ -191,7 +192,8 @@ function initEventListeners() {
           url: feedUrl,
           group_id: feedGroup ? parseInt(feedGroup) : null,
           last_updated: null,
-          translate_enabled: translateEnabled
+          translate_enabled: translateEnabled,
+          notification_enabled: notificationEnabled
         };
         
         await invoke('add_feed', { feed });
@@ -740,6 +742,7 @@ function initEventListeners() {
       
       try {
         const translateEnabled = document.getElementById('edit-translate-enabled').checked;
+        const notificationEnabled = document.getElementById('edit-notification-enabled').checked;
       
       const feed = {
           id: feedId,
@@ -747,7 +750,8 @@ function initEventListeners() {
           url: feedUrl,
           group_id: feedGroup ? parseInt(feedGroup) : null,
           last_updated: null, // 由后端更新
-          translate_enabled: translateEnabled
+          translate_enabled: translateEnabled,
+          notification_enabled: notificationEnabled
         };
         
         await invoke('update_feed', { feed });
@@ -1078,6 +1082,7 @@ async function loadFeeds() {
             document.getElementById('edit-feed-url').value = feed.url;
             document.getElementById('edit-feed-group').value = feed.group_id || '';
             document.getElementById('edit-translate-enabled').checked = feed.translate_enabled || false;
+            document.getElementById('edit-notification-enabled').checked = feed.notification_enabled !== false;
             editFeedModal.classList.add('show');
           });
         }
@@ -1240,6 +1245,7 @@ async function loadFeeds() {
             document.getElementById('edit-feed-url').value = feed.url;
             document.getElementById('edit-feed-group').value = feed.group_id || '';
             document.getElementById('edit-translate-enabled').checked = feed.translate_enabled || false;
+            document.getElementById('edit-notification-enabled').checked = feed.notification_enabled !== false;
             editFeedModal.classList.add('show');
           });
         }
@@ -2108,6 +2114,12 @@ let chatHistory = [];
 const MAX_CONTEXT_SIZE = 8192;
 const CHAT_HISTORY_KEY = 'ai_chat_history';
 
+// 文件上传功能
+let fileUploadBtn;
+let fileUpload;
+let filePreviewArea;
+let uploadedFiles = [];
+
 // 从localStorage加载聊天记录
 function loadChatHistory() {
   try {
@@ -2148,6 +2160,11 @@ function initAIChat() {
   sendChatBtn = document.getElementById('send-chat-btn');
   clearChatBtn = document.getElementById('clear-chat-btn');
   aiPlatformSelect = document.getElementById('ai-platform-select');
+  
+  // 文件上传相关DOM元素
+  fileUploadBtn = document.getElementById('file-upload-btn');
+  fileUpload = document.getElementById('file-upload');
+  filePreviewArea = document.getElementById('file-preview-area');
   
   // AI聊天按钮点击事件
   if (aiChatBtn) {
@@ -2207,6 +2224,18 @@ function initAIChat() {
       aiChatModal.classList.remove('show');
     });
   });
+  
+  // 文件上传按钮点击事件
+  if (fileUploadBtn) {
+    fileUploadBtn.addEventListener('click', () => {
+      fileUpload.click();
+    });
+  }
+  
+  // 文件选择事件
+  if (fileUpload) {
+    fileUpload.addEventListener('change', handleFileSelect);
+  }
 }
 
 // 加载AI平台列表到选择框
@@ -2235,15 +2264,142 @@ async function loadAIPlatformsToSelect() {
   }
 }
 
+// 处理文件选择
+function handleFileSelect(event) {
+  const files = event.target.files;
+  if (!files || files.length === 0) return;
+  
+  // 处理每个选中的文件
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    handleFile(file);
+  }
+  
+  // 清空文件输入，允许重复选择同一文件
+  event.target.value = '';
+}
+
+// 处理单个文件
+function handleFile(file) {
+  // 检查文件类型
+  const isTextFile = file.type.startsWith('text/') || ['.txt', '.md'].includes(getFileExtension(file.name));
+  const isImageFile = file.type.startsWith('image/');
+  
+  if (!isTextFile && !isImageFile) {
+    showNotification('不支持的文件类型', 'error');
+    return;
+  }
+  
+  // 检查文件大小（限制为10MB）
+  const MAX_FILE_SIZE = 10 * 1024 * 1024;
+  if (file.size > MAX_FILE_SIZE) {
+    showNotification('文件大小超过限制（最大10MB）', 'error');
+    return;
+  }
+  
+  // 读取文件
+  const reader = new FileReader();
+  
+  reader.onload = (e) => {
+    const fileData = {
+      name: file.name,
+      type: file.type,
+      size: file.size
+    };
+    
+    if (isTextFile) {
+      // 文本文件：直接使用文本内容
+      fileData.content = e.target.result;
+      fileData.contentType = 'text';
+    } else if (isImageFile) {
+      // 图片文件：使用base64编码
+      fileData.content = e.target.result;
+      fileData.contentType = 'image_url';
+    }
+    
+    // 添加到已上传文件列表
+    uploadedFiles.push(fileData);
+    
+    // 更新文件预览
+    updateFilePreview();
+  };
+  
+  if (isTextFile) {
+    reader.readAsText(file);
+  } else if (isImageFile) {
+    reader.readAsDataURL(file);
+  }
+}
+
+// 获取文件扩展名
+function getFileExtension(filename) {
+  return filename.slice((filename.lastIndexOf('.') - 1 >>> 0) + 2);
+}
+
+// 更新文件预览
+function updateFilePreview() {
+  filePreviewArea.innerHTML = '';
+  
+  if (uploadedFiles.length === 0) return;
+  
+  uploadedFiles.forEach((file, index) => {
+    const previewItem = document.createElement('div');
+    previewItem.className = 'file-preview-item';
+    previewItem.innerHTML = `
+      <div class="file-preview-info">
+        <span class="file-name">${file.name}</span>
+        <span class="file-size">(${formatFileSize(file.size)})</span>
+      </div>
+      <button class="file-preview-remove" data-index="${index}">×</button>
+    `;
+    
+    filePreviewArea.appendChild(previewItem);
+  });
+  
+  // 添加删除文件事件监听
+  const removeButtons = filePreviewArea.querySelectorAll('.file-preview-remove');
+  removeButtons.forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const index = parseInt(e.target.dataset.index);
+      removeFile(index);
+    });
+  });
+}
+
+// 格式化文件大小
+function formatFileSize(bytes) {
+  if (bytes === 0) return '0 B';
+  
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+// 删除已上传的文件
+function removeFile(index) {
+  uploadedFiles.splice(index, 1);
+  updateFilePreview();
+}
+
 // 发送消息
 async function sendMessage() {
   const message = aiChatInput.value.trim();
-  if (!message) return;
+  
+  // 检查是否有消息或文件
+  if (!message && uploadedFiles.length === 0) return;
+  
+  // 构建包含文件的用户消息
+  const userMsgContent = {
+    text: message,
+    files: [...uploadedFiles]
+  };
   
   // 添加用户消息到聊天历史
   const userMsg = {
     role: 'user',
-    content: message,
+    content: userMsgContent,
     timestamp: new Date()
   };
   chatHistory.push(userMsg);
@@ -2254,8 +2410,10 @@ async function sendMessage() {
   // 保存聊天记录
   saveChatHistory();
   
-  // 清空输入框
+  // 清空输入框和文件列表
   aiChatInput.value = '';
+  uploadedFiles = [];
+  updateFilePreview();
   
   // 处理上下文大小
   manageChatContext();
@@ -2277,10 +2435,55 @@ async function sendMessage() {
     // 过滤掉"正在思考..."消息
     .filter(msg => msg.content !== '正在思考...')
     // 转换角色，将'ai'转换为API接受的'assistant'
-    .map(msg => ({
-      role: msg.role === 'ai' ? 'assistant' : msg.role,
-      content: msg.content
-    }));
+    .map(msg => {
+      // 转换消息格式
+      const apiMsg = {
+        role: msg.role === 'ai' ? 'assistant' : msg.role
+      };
+      
+      // 处理消息内容
+      if (typeof msg.content === 'string') {
+        // 普通文本消息
+        apiMsg.content = msg.content;
+      } else {
+        // 包含文件的消息
+        const contentItems = [];
+        
+        // 添加文本内容（如果有）
+        if (msg.content.text && msg.content.text.trim()) {
+          contentItems.push({
+            type: 'text',
+            text: msg.content.text.trim()
+          });
+        }
+        
+        // 添加文件内容（如果有）
+        if (msg.content.files && msg.content.files.length > 0) {
+          msg.content.files.forEach(file => {
+            if (file.contentType === 'text') {
+              contentItems.push({
+                type: 'text',
+                text: file.content
+              });
+            } else if (file.contentType === 'image_url') {
+              contentItems.push({
+                type: 'image_url',
+                image_url: {
+                  url: file.content
+                }
+              });
+            }
+          });
+        }
+        
+        // 设置消息内容
+        apiMsg.content = contentItems.length === 1 && contentItems[0].type === 'text' 
+          ? contentItems[0].text 
+          : contentItems;
+      }
+      
+      return apiMsg;
+    });
   
   console.log('发送给API的消息:', messages);
   
@@ -2298,8 +2501,27 @@ async function sendMessage() {
     });
   } catch (error) {
     console.error('AI聊天请求失败:', error);
+    
+    // 尝试从错误消息中提取有用的信息
+    let errorMessage = 'AI聊天失败';
+    
+    if (error && error.message) {
+      // 如果错误消息包含"API Error"，提取API错误信息
+      if (error.message.includes('API Error')) {
+        // 尝试提取API返回的错误消息
+        const apiErrorMatch = error.message.match(/"message":"([^"]+)"/);
+        if (apiErrorMatch && apiErrorMatch[1]) {
+          errorMessage = `AI聊天失败: ${apiErrorMatch[1]}`;
+        } else {
+          errorMessage = `AI聊天失败: ${error.message}`;
+        }
+      } else {
+        errorMessage = `AI聊天失败: ${error.message}`;
+      }
+    }
+    
     // 替换正在思考消息为错误消息
-    chatHistory[chatHistory.length - 1].content = `AI聊天失败: ${error.message}`;
+    chatHistory[chatHistory.length - 1].content = errorMessage;
     updateChatMessages();
     
     // 保存聊天记录
@@ -2389,7 +2611,54 @@ function createMessageElement(msg) {
   
   const bubble = document.createElement('div');
   bubble.className = 'message-bubble';
-  bubble.textContent = msg.content;
+  
+  // 处理不同类型的消息内容
+  if (typeof msg.content === 'string') {
+    // 普通文本消息
+    bubble.textContent = msg.content;
+  } else {
+    // 包含文件的消息
+    // 添加文本内容（如果有）
+    if (msg.content.text && msg.content.text.trim()) {
+      const textParagraph = document.createElement('p');
+      textParagraph.textContent = msg.content.text.trim();
+      bubble.appendChild(textParagraph);
+    }
+    
+    // 添加文件内容（如果有）
+    if (msg.content.files && msg.content.files.length > 0) {
+      const filesContainer = document.createElement('div');
+      filesContainer.className = 'message-files';
+      
+      msg.content.files.forEach(file => {
+        const fileItem = document.createElement('div');
+        fileItem.className = 'message-file-item';
+        
+        if (file.contentType === 'text') {
+          // 文本文件
+          fileItem.innerHTML = `
+            <div class="file-icon">📄</div>
+            <div class="file-info">
+              <div class="file-name">${file.name}</div>
+              <div class="file-size">${formatFileSize(file.size)}</div>
+            </div>
+          `;
+        } else if (file.contentType === 'image_url') {
+          // 图片文件
+          fileItem.innerHTML = `
+            <div class="image-preview-container">
+              <img src="${file.content}" alt="${file.name}" class="message-image-preview" />
+              <div class="file-name">${file.name}</div>
+            </div>
+          `;
+        }
+        
+        filesContainer.appendChild(fileItem);
+      });
+      
+      bubble.appendChild(filesContainer);
+    }
+  }
   
   const time = document.createElement('div');
   time.className = 'message-time';
@@ -2412,7 +2681,56 @@ function updateLastAIMessage() {
     if (lastElement) {
       const bubble = lastElement.querySelector('.message-bubble');
       if (bubble) {
-        bubble.textContent = lastMessage.content;
+        // 清空气泡内容
+        bubble.innerHTML = '';
+        
+        // 处理不同类型的消息内容
+        if (typeof lastMessage.content === 'string') {
+          // 普通文本消息
+          bubble.textContent = lastMessage.content;
+        } else {
+          // 包含文件的消息
+          // 添加文本内容（如果有）
+          if (lastMessage.content.text && lastMessage.content.text.trim()) {
+            const textParagraph = document.createElement('p');
+            textParagraph.textContent = lastMessage.content.text.trim();
+            bubble.appendChild(textParagraph);
+          }
+          
+          // 添加文件内容（如果有）
+          if (lastMessage.content.files && lastMessage.content.files.length > 0) {
+            const filesContainer = document.createElement('div');
+            filesContainer.className = 'message-files';
+            
+            lastMessage.content.files.forEach(file => {
+              const fileItem = document.createElement('div');
+              fileItem.className = 'message-file-item';
+              
+              if (file.contentType === 'text') {
+                // 文本文件
+                fileItem.innerHTML = `
+                  <div class="file-icon">📄</div>
+                  <div class="file-info">
+                    <div class="file-name">${file.name}</div>
+                    <div class="file-size">${formatFileSize(file.size)}</div>
+                  </div>
+                `;
+              } else if (file.contentType === 'image_url') {
+                // 图片文件
+                fileItem.innerHTML = `
+                  <div class="image-preview-container">
+                    <img src="${file.content}" alt="${file.name}" class="message-image-preview" />
+                    <div class="file-name">${file.name}</div>
+                  </div>
+                `;
+              }
+              
+              filesContainer.appendChild(fileItem);
+            });
+            
+            bubble.appendChild(filesContainer);
+          }
+        }
       }
       const time = lastElement.querySelector('.message-time');
       if (time) {
@@ -2436,14 +2754,44 @@ function manageChatContext() {
   // 计算当前上下文大小
   let contextSize = 0;
   for (const msg of chatHistory) {
-    contextSize += msg.content.length;
+    if (typeof msg.content === 'string') {
+      // 普通文本消息
+      contextSize += msg.content.length;
+    } else {
+      // 包含文件的消息
+      // 计算文本内容大小
+      if (msg.content.text) {
+        contextSize += msg.content.text.length;
+      }
+      // 计算文件内容大小（对于文本文件，直接使用内容长度；对于图片文件，使用base64编码的长度）
+      if (msg.content.files) {
+        msg.content.files.forEach(file => {
+          contextSize += file.content.length;
+        });
+      }
+    }
   }
   
   // 如果超过最大限制，移除最早的消息
   while (contextSize > MAX_CONTEXT_SIZE && chatHistory.length > 2) {
     // 移除第一条消息（保留至少一条用户消息和一条AI消息）
     const removedMsg = chatHistory.shift();
-    contextSize -= removedMsg.content.length;
+    if (typeof removedMsg.content === 'string') {
+      // 普通文本消息
+      contextSize -= removedMsg.content.length;
+    } else {
+      // 包含文件的消息
+      // 减去文本内容大小
+      if (removedMsg.content.text) {
+        contextSize -= removedMsg.content.text.length;
+      }
+      // 减去文件内容大小
+      if (removedMsg.content.files) {
+        removedMsg.content.files.forEach(file => {
+          contextSize -= file.content.length;
+        });
+      }
+    }
   }
 }
 

@@ -121,6 +121,11 @@
             <input type="checkbox" id="translate-enabled" />
             <span class="help-text">启用后，会自动翻译文章标题和内容</span>
           </div>
+          <div class="form-group">
+            <label for="notification-enabled">新文章通知：</label>
+            <input type="checkbox" id="notification-enabled" checked />
+            <span class="help-text">启用后，收到新文章时显示系统通知</span>
+          </div>
           <div class="form-actions">
             <button type="submit">添加</button>
             <button type="button" class="cancel">取消</button>
@@ -215,6 +220,11 @@
             <label for="edit-translate-enabled">AI翻译：</label>
             <input type="checkbox" id="edit-translate-enabled" />
             <span class="help-text">启用后，会自动翻译文章标题和内容</span>
+          </div>
+          <div class="form-group">
+            <label for="edit-notification-enabled">新文章通知：</label>
+            <input type="checkbox" id="edit-notification-enabled" checked />
+            <span class="help-text">启用后，收到新文章时显示系统通知</span>
           </div>
           <div class="form-actions">
             <button type="submit">保存</button>
@@ -403,7 +413,20 @@
         
         <!-- 底部：输入区 -->
         <div class="ai-chat-input-area">
-          <textarea id="ai-chat-input" placeholder="输入您的问题..." rows="3"></textarea>
+          <!-- 文件上传预览区 -->
+          <div id="file-preview-area" class="file-preview-area"></div>
+          
+          <div class="ai-chat-input-row">
+            <!-- 文件上传按钮 -->
+            <div class="file-upload-container">
+              <input type="file" id="file-upload" accept=".txt,.md,.pdf,.jpg,.jpeg,.png,.gif" style="display: none;">
+              <button id="file-upload-btn" class="upload-btn">📁 上传文件</button>
+            </div>
+            
+            <!-- 聊天输入框 -->
+            <textarea id="ai-chat-input" placeholder="输入您的问题..." rows="3"></textarea>
+          </div>
+          
           <div class="ai-chat-input-actions">
             <button id="send-chat-btn" class="send-btn">发送</button>
           </div>

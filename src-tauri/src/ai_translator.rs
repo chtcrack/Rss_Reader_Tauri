@@ -3,7 +3,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use futures::StreamExt;
+
 
 /// AI翻译配置
 #[derive(Debug, Clone)]
@@ -39,11 +39,37 @@ pub struct TranslationResponse {
     pub target_language: String,
 }
 
+/// AI聊天消息内容项
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MessageContentItem {
+    #[serde(rename = "type")]
+    pub content_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_url: Option<ImageUrl>,
+}
+
+/// AI聊天图片URL
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ImageUrl {
+    pub url: String,
+}
+
 /// AI聊天请求消息
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChatMessage {
     pub role: String,
-    pub content: String,
+    pub content: ChatMessageContent,
+}
+
+/// AI聊天消息内容（支持多种格式）
+#[derive(Debug, Clone)]
+pub enum ChatMessageContent {
+    /// 简单文本格式
+    Text(String),
+    /// 多部分内容格式（支持文本+图像）
+    Multipart(Vec<MessageContentItem>),
 }
 
 /// AI聊天请求
@@ -54,6 +80,83 @@ pub struct ChatRequest {
     pub max_tokens: u32,
     pub temperature: f32,
     pub stream: bool,
+}
+
+// 为ChatMessageContent实现自定义序列化，以便兼容OpenAI API格式
+impl Serialize for ChatMessageContent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            // 简单文本格式：直接序列化为字符串
+            ChatMessageContent::Text(text) => {
+                serializer.serialize_str(text)
+            },
+            // 多部分内容格式：序列化为对象数组
+            ChatMessageContent::Multipart(items) => {
+                use serde::ser::SerializeSeq;
+                let mut seq = serializer.serialize_seq(Some(items.len()))?;
+                for item in items {
+                    seq.serialize_element(item)?;
+                }
+                seq.end()
+            },
+        }
+    }
+}
+
+// 为ChatMessageContent实现自定义反序列化，以便兼容OpenAI API格式
+impl<'de> Deserialize<'de> for ChatMessageContent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // 定义访客结构体
+        struct ChatMessageContentVisitor;
+        
+        impl<'de> serde::de::Visitor<'de> for ChatMessageContentVisitor {
+            type Value = ChatMessageContent;
+            
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("string or array of message content items")
+            }
+            
+            // 处理字符串类型（简单文本格式）
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(ChatMessageContent::Text(v.to_string()))
+            }
+            
+            // 处理字符串类型（另一种情况）
+            fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(ChatMessageContent::Text(v))
+            }
+            
+            // 处理序列类型（多部分内容格式）
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut items = Vec::new();
+                
+                // 遍历序列中的每个元素
+                while let Some(item) = seq.next_element::<MessageContentItem>()? {
+                    items.push(item);
+                }
+                
+                Ok(ChatMessageContent::Multipart(items))
+            }
+        }
+        
+        // 使用访客模式进行反序列化
+        deserializer.deserialize_any(ChatMessageContentVisitor)
+    }
 }
 
 /// AI聊天响应片段（流式）
@@ -153,7 +256,7 @@ impl AITranslator {
             model: platform.api_model,
             messages: vec![ChatMessage {
                 role: "user".to_string(),
-                content: prompt,
+                content: ChatMessageContent::Text(prompt),
             }],
             max_tokens: self.config.max_tokens,
             temperature: self.config.temperature,
@@ -328,7 +431,33 @@ impl AITranslator {
             .send()
             .await?;
 
-        eprintln!("[AI] API响应状态: {:?}", response.status());
+        // 获取响应状态码并保存
+        let status = response.status();
+        eprintln!("[AI] API响应状态: {:?}", status);
+        
+        // 检查API响应状态码，如果不是成功状态，读取并输出响应内容
+        if !status.is_success() {
+            let response_text = response.text().await?;
+            eprintln!("[AI] API错误响应: {}", response_text);
+            
+            // 尝试解析错误响应JSON，提取错误消息
+            let error_message = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&response_text) {
+                // 尝试多种错误消息格式
+                if let Some(msg) = json.get("message").and_then(|m| m.as_str()) {
+                    msg.to_string()
+                } else if let Some(msg) = json.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()) {
+                    msg.to_string()
+                } else if let Some(msg) = json.get("error").and_then(|e| e.as_str()) {
+                    msg.to_string()
+                } else {
+                    response_text.clone()
+                }
+            } else {
+                response_text.clone()
+            };
+            
+            return Err(format!("API错误: {}", error_message).into());
+        }
 
         let mut stream = response.bytes_stream();
         let mut buffer = Vec::new();
@@ -432,6 +561,34 @@ impl AITranslator {
             .json(&chat_request)
             .send()
             .await?;
+
+        // 获取响应状态码并保存
+        let status = response.status();
+        eprintln!("[AI] API响应状态: {:?}", status);
+        
+        // 检查API响应状态码，如果不是成功状态，读取并输出响应内容
+        if !status.is_success() {
+            let response_text = response.text().await?;
+            eprintln!("[AI] API错误响应: {}", response_text);
+            
+            // 尝试解析错误响应JSON，提取错误消息
+            let error_message = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&response_text) {
+                // 尝试多种错误消息格式
+                if let Some(msg) = json.get("message").and_then(|m| m.as_str()) {
+                    msg.to_string()
+                } else if let Some(msg) = json.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()) {
+                    msg.to_string()
+                } else if let Some(msg) = json.get("error").and_then(|e| e.as_str()) {
+                    msg.to_string()
+                } else {
+                    response_text.clone()
+                }
+            } else {
+                response_text.clone()
+            };
+            
+            return Err(format!("API错误: {}", error_message).into());
+        }
 
         // 解析响应
         let response_text = response.text().await?;

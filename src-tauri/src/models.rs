@@ -10,6 +10,10 @@ pub struct Feed {
     pub group_id: Option<i64>,
     pub last_updated: Option<DateTime<Utc>>,
     pub translate_enabled: bool,
+    pub notification_enabled: bool,
+    pub last_update_status: Option<String>,
+    pub update_attempts: i32,
+    pub next_retry_time: Option<DateTime<Utc>>,
 }
 
 /// 文章数据模型

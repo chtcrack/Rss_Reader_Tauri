@@ -1,6 +1,7 @@
 use std::fs;
 use tauri::{State, Emitter, Manager, async_runtime::Mutex};
 use tauri_plugin_opener::OpenerExt;
+use tauri_plugin_notification::NotificationExt;
 use serde::{Deserialize, Serialize};
 use toml::from_str;
 
@@ -16,7 +17,7 @@ use crate::rss::RssUpdater;
 use crate::ai_translator::AI_TRANSLATOR;
 
 /// 配置文件结构
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
 struct Config {
     /// 数据库配置
     db: Option<DbConfig>,
@@ -25,7 +26,7 @@ struct Config {
 }
 
 /// 数据库配置
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
 struct DbConfig {
     /// 数据库文件路径类型
     /// - "user" (默认): 使用用户AppData目录
@@ -37,16 +38,62 @@ struct DbConfig {
 }
 
 /// 更新配置
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
 struct UpdateConfig {
     /// 自动更新间隔（秒）
     interval: Option<u64>,
+}
+
+// 配置缓存结构体
+struct ConfigCache {
+    config: Config,
+    last_modified: std::time::SystemTime,
 }
 
 // 应用状态
 struct AppState {
     db_manager: Mutex<DbManager>,
     rss_updater: Mutex<RssUpdater>,
+    config_cache: Mutex<Option<ConfigCache>>,
+}
+
+/// 异步发送新文章通知（不阻塞主线程）
+fn send_new_article_notification(app: &tauri::AppHandle, feed_name: &str, article_title: &str, translated_title: Option<&str>, notification_enabled: bool) {
+    if !notification_enabled {
+        return;
+    }
+    
+    let app = app.clone();
+    let feed_name = feed_name.to_string();
+    
+    let display_title = match translated_title {
+        Some(translated) if !translated.is_empty() => {
+            if translated.len() > 50 {
+                translated[..50].to_string()
+            } else {
+                translated.to_string()
+            }
+        }
+        _ => {
+            if article_title.len() > 50 {
+                article_title[..50].to_string()
+            } else {
+                article_title.to_string()
+            }
+        }
+    };
+    
+    tokio::spawn(async move {
+        let result = app.notification()
+            .builder()
+            .title(format!("RSS: {}", feed_name))
+            .body(format!("新文章: {}", display_title))
+            .show();
+        
+        if let Err(e) = result {
+            eprintln!("Failed to send notification: {}", e);
+        }
+    });
 }
 
 // Tauri命令：初始化数据库
@@ -143,6 +190,7 @@ async fn update_single_feed(app: tauri::AppHandle, app_state: State<'_, AppState
                 
                 if let Ok(true) = db_manager.add_article(&article) {
                     new_article_count += 1;
+                    send_new_article_notification(&app, &feed.name, &article.title, article.translated_title.as_deref(), feed.notification_enabled);
                 }
             }
             
@@ -194,6 +242,7 @@ async fn update_single_feed(app: tauri::AppHandle, app_state: State<'_, AppState
                     let db_manager = app_state.db_manager.lock().await;
                     if let Ok(true) = db_manager.add_article(&article) {
                         new_article_count += 1;
+                        send_new_article_notification(&app, &feed.name, &article.title, article.translated_title.as_deref(), feed.notification_enabled);
                     }
                 }
                 eprintln!("[AI] ===== 完成RSS源 {} 的文章翻译 ======", feed.name);
@@ -288,6 +337,7 @@ async fn add_feed(app: tauri::AppHandle, app_state: State<'_, AppState>, feed: F
                     
                     if let Ok(true) = db_manager.add_article(&article) {
                         new_article_count += 1;
+                        send_new_article_notification(&app, &new_feed.name, &article.title, article.translated_title.as_deref(), new_feed.notification_enabled);
                     }
                 }
                 
@@ -344,6 +394,7 @@ async fn add_feed(app: tauri::AppHandle, app_state: State<'_, AppState>, feed: F
                             let db_manager = app_state.db_manager.lock().await;
                             if let Ok(true) = db_manager.add_article(&article) {
                                 new_article_count += 1;
+                                send_new_article_notification(&app, &new_feed.name, &article.title, article.translated_title.as_deref(), new_feed.notification_enabled);
                             }
                         }
                         eprintln!("[AI] ===== 完成RSS源 {} 的文章翻译 ======", new_feed.name);
@@ -355,6 +406,7 @@ async fn add_feed(app: tauri::AppHandle, app_state: State<'_, AppState>, feed: F
                             let db_manager = app_state.db_manager.lock().await;
                             if let Ok(true) = db_manager.add_article(&article) {
                                 new_article_count += 1;
+                                send_new_article_notification(&app, &new_feed.name, &article.title, article.translated_title.as_deref(), new_feed.notification_enabled);
                             }
                         }
                     }
@@ -670,7 +722,7 @@ async fn set_default_ai_platform(app_state: State<'_, AppState>, platform_id: i6
 
 // Tauri命令：更新自动更新间隔
 #[tauri::command(async)]
-async fn update_update_interval(interval: u64) -> Result<(), String> {
+async fn update_update_interval(app_state: State<'_, AppState>, interval: u64) -> Result<(), String> {
     use std::fs::write;
     
     // 读取当前配置
@@ -695,10 +747,22 @@ async fn update_update_interval(interval: u64) -> Result<(), String> {
     })?;
     
     // 写入配置文件
-    write(config_path, toml_content).map_err(|e| {
+    write(&config_path, toml_content).map_err(|e| {
         eprintln!("Failed to write config file: {}", e);
         format!("Failed to save update interval: {}", e)
     })?;
+    
+    // 更新配置缓存
+    let current_modified = match std::fs::metadata(&config_path) {
+        Ok(metadata) => metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+        Err(_) => std::time::SystemTime::UNIX_EPOCH,
+    };
+    
+    let mut config_cache_guard = app_state.config_cache.lock().await;
+    *config_cache_guard = Some(ConfigCache {
+        config,
+        last_modified: current_modified,
+    });
     
     Ok(())
 }
@@ -760,7 +824,8 @@ async fn ai_chat(
         Ok(_) => Ok(()),
         Err(e) => {
             eprintln!("Failed to call chat_completion_stream: {}", e);
-            Err(format!("AI chat failed: {}", e))
+            // 将错误转换为字符串返回给前端
+            Err(e.to_string())
         }
     }
 }
@@ -797,8 +862,8 @@ async fn update_all_feeds(_app: tauri::AppHandle, app_state: State<'_, AppState>
                 // 尝试添加文章，如果成功则说明是新文章
                 match db_manager.add_article(&article) {
                     Ok(true) => {
-                        // 简单的打印通知，后续可以升级为系统通知
-                        println!("New article from {}: {}", feed.name, article.title);
+                        // 发送新文章通知
+                        send_new_article_notification(&_app, &feed.name, &article.title, article.translated_title.as_deref(), feed.notification_enabled);
                     }
                     Ok(false) => {
                         // 文章已存在，忽略
@@ -821,201 +886,418 @@ async fn update_all_feeds(_app: tauri::AppHandle, app_state: State<'_, AppState>
 }
 
 // 自动更新任务函数
-async fn auto_update_feeds_task(app_handle: tauri::AppHandle) {
+async fn auto_update_feeds_task(app: tauri::AppHandle) {
     use tokio::time::{sleep, Duration};
     use chrono::{Utc};
     
     println!("启动自动更新任务");
     
     loop {
-        // 读取配置文件，获取更新间隔
-        let config = read_config_file();
+        // 从应用直接获取状态，确保它具有'static生命周期
+        let app_state = app.state::<AppState>();
+        
+        // 从缓存获取配置，或重新读取
+        let config = {
+            let mut config_cache_guard = app_state.config_cache.lock().await;
+            let config_path = get_config_path();
+            
+            // 检查配置文件是否存在
+            if !config_path.exists() {
+                println!("配置文件不存在，使用默认配置");
+                Config::default()
+            } else {
+                // 获取文件修改时间
+                let current_modified = match std::fs::metadata(&config_path) {
+                    Ok(metadata) => metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                    Err(_) => std::time::SystemTime::UNIX_EPOCH,
+                };
+                
+                // 检查缓存是否有效
+                let is_cache_valid = if let Some(cache) = &*config_cache_guard {
+                    cache.last_modified == current_modified
+                } else {
+                    false
+                };
+                
+                if is_cache_valid {
+                    // 使用缓存的配置
+                    println!("使用缓存的配置");
+                    config_cache_guard.as_ref().unwrap().config.clone()
+                } else {
+                    // 重新读取配置文件
+                    println!("配置文件已修改，重新读取");
+                    let config = read_config_file();
+                    
+                    // 更新缓存
+                    *config_cache_guard = Some(ConfigCache {
+                        config: config.clone(),
+                        last_modified: current_modified,
+                    });
+                    
+                    config
+                }
+            }
+        };
+        
         let update_interval = match &config.update {
             Some(update_config) => update_config.interval.unwrap_or(5 * 60), // 默认5分钟
             None => 5 * 60, // 默认5分钟
         };
         
-        // 获取应用状态
-        let app_state = app_handle.state::<AppState>();
-        
-        // 获取所有RSS源
-        let feeds = {
+        // 获取所有RSS源 - 缩短锁持有时间
+        let all_feeds = match {
             let db_manager = app_state.db_manager.lock().await;
-            match db_manager.get_all_feeds() {
-                Ok(feeds) => feeds,
-                Err(e) => {
-                    eprintln!("Failed to get feeds for auto-update: {}", e);
-                    sleep(Duration::from_secs(60)).await;
-                    continue;
-                }
+            db_manager.get_all_feeds()
+        } {
+            Ok(feeds) => feeds,
+            Err(e) => {
+                eprintln!("Failed to get feeds for auto-update: {}", e);
+                sleep(Duration::from_secs(60)).await;
+                continue;
             }
         };
         
-        // 获取所有RSS源，统一更新
-        let feeds_to_update = feeds;
+        // 保存总源数量，避免后续使用被移动的all_feeds
+        let total_feeds_count = all_feeds.len();
+        
+        // 筛选需要更新的RSS源：
+        // 1. 没有失败记录的源
+        // 2. 有失败记录但下次重试时间已到的源
+        let now = Utc::now();
+        let feeds_to_update: Vec<Feed> = all_feeds.into_iter()
+            .filter(|feed| {
+                match &feed.next_retry_time {
+                    None => true, // 没有失败记录，正常更新
+                    Some(retry_time) => *retry_time <= now, // 下次重试时间已到
+                }
+            })
+            .collect();
         
         if !feeds_to_update.is_empty() {
-            // 获取RSS更新器
+            // 获取RSS更新器 - 缩短锁持有时间
             let rss_updater = {
                 let rss_updater = app_state.rss_updater.lock().await;
                 rss_updater.clone()
             };
             
-            // 更新所有启用的RSS源
+            // 更新需要更新的RSS源
+            println!("开始自动更新 {} 个RSS源（共 {} 个源）", feeds_to_update.len(), total_feeds_count);
             let results = rss_updater.update_feeds(&feeds_to_update).await;
             
-            for result in results {
+            // 处理更新结果
+            for (index, result) in results.iter().enumerate() {
+                let feed = &feeds_to_update[index];
                 match result {
-                    Ok((feed, articles)) => {
-                        // 更新feed的last_updated时间
-                        let mut updated_feed = feed.clone();
-                        updated_feed.last_updated = Some(Utc::now());
+                    Ok((_, articles)) => {
+                        println!("成功获取来自 {} 的 {} 篇文章", feed.name, articles.len());
                         
-                        // 更新数据库中的feed信息
-                        {
+                        // 更新feed的成功状态 - 立即释放锁
+                        let last_updated = Utc::now();
+                        if let Err(e) = {
                             let mut db_manager = app_state.db_manager.lock().await;
-                            if let Err(e) = db_manager.update_feed(&updated_feed) {
-                                eprintln!("Failed to update feed last_updated time: {}", e);
-                            }
+                            db_manager.update_feed_success(feed.id, last_updated)
+                        } {
+                            eprintln!("Failed to update feed success status for {}: {}", feed.name, e);
                         }
                         
-                        // 检查哪些文章需要翻译
-                        let mut articles_to_translate = Vec::new();
-                        let mut articles_to_save = Vec::new();
+                        // 异步处理文章保存和翻译，避免阻塞主循环
+                        let app_clone = app.clone();
+                        let feed_clone = feed.clone();
+                        let articles_clone = articles.clone();
                         
-                        // 筛选需要翻译的文章
-                        {
-                            let db_manager = app_state.db_manager.lock().await;
-                            for article in articles {
-                                if feed.translate_enabled {
-                                    if let Ok(needs_translation) = db_manager.article_needs_translation(article.feed_id, &article.link) {
-                                        if needs_translation {
-                                            articles_to_translate.push(article.clone());
-                                        } else {
-                                            articles_to_save.push(article);
-                                        }
-                                    } else {
-                                        // 查询失败，默认需要翻译
-                                        articles_to_translate.push(article.clone());
-                                    }
-                                } else {
-                                    // 未启用翻译，直接保存
-                                    articles_to_save.push(article);
-                                }
-                            }
-                        }
-                        
-                        // 保存不需要翻译的文章
-                        for article in articles_to_save {
-                            let db_manager = app_state.db_manager.lock().await;
-                            match db_manager.add_article(&article) {
-                                Ok(true) => {
-                                    println!("New article from {}: {}", feed.name, article.title);
-                                }
-                                Ok(false) => {
-                                    // 文章已存在，忽略
-                                }
-                                Err(e) => {
-                                    eprintln!("Failed to add article: {}", e);
-                                }
-                            }
-                        }
-                        
-                        // 翻译需要翻译的文章
-                        if !articles_to_translate.is_empty() && feed.translate_enabled {
-                            eprintln!("[AI] ===== 开始翻译RSS源 {} 的文章 ======", feed.name);
-                            eprintln!("[AI] 需要翻译的文章数量: {}", articles_to_translate.len());
-                            
-                            // 从数据库获取默认AI平台
-                            let default_platform = {
-                                let db_manager = app_state.db_manager.lock().await;
-                                match db_manager.get_default_ai_platform() {
-                                    Ok(platform) => platform,
-                                    Err(e) => {
-                                        eprintln!("Failed to get default AI platform from database: {}", e);
-                                        None
-                                    }
-                                }
-                            };
-                            
-                            // 如果没有默认平台，直接保存未翻译的文章
-                            if default_platform.is_none() {
-                                eprintln!("[AI] 错误: 没有配置默认AI平台");
-                                // 保存未翻译的文章，每篇独立获取和释放锁
-                                for article in articles_to_translate {
-                                    let db_manager = app_state.db_manager.lock().await;
-                                    match db_manager.add_article(&article) {
-                                        Ok(true) => {
-                                            println!("New article from {}: {}", feed.name, article.title);
-                                        }
-                                        Ok(false) => {
-                                            // 文章已存在，忽略
-                                        }
-                                        Err(e) => {
-                                            eprintln!("Failed to add article: {}", e);
-                                        }
-                                    }
-                                }
-                            } else {
-                                // 获取AI翻译器实例并设置默认平台
-                                let translator = AI_TRANSLATOR.get_translator().await
-                                    .with_default_platform(default_platform);
-                                
-                                // 遍历需要翻译的文章，进行翻译并实时保存
-                                for (index, article) in articles_to_translate.iter_mut().enumerate() {
-                                    eprintln!("[AI] 开始翻译第 {} 篇文章: {}", index + 1, article.title);
-                                    eprintln!("[AI] 文章内容长度: {}", article.content.len());
-                                    
-                                    match translator.translate_rss_content(
-                                        &article.title,
-                                        &article.content,
-                                        "zh-CN",  // 默认翻译为中文
-                                    ).await {
-                                        Ok((translated_title, translated_content)) => {
-                                            // 翻译成功，更新文章字段
-                                            eprintln!("[AI] 成功翻译文章标题: {}", translated_title);
-                                            eprintln!("[AI] 翻译后内容长度: {}", translated_content.len());
-                                            article.translated_title = Some(translated_title);
-                                            article.translated_content = Some(translated_content);
-                                        },
-                                        Err(e) => {
-                                            // 翻译失败，记录错误但不影响整体更新
-                                            eprintln!("[AI] 翻译文章 {} 失败: {}", article.title, e);
-                                            eprintln!("[AI] 错误详情: {:?}", e);
-                                            // 保持translated_title和translated_content为None
-                                        }
-                                    }
-                                    eprintln!("[AI] 完成第 {} 篇文章翻译", index + 1);
-                                    
-                                    // 翻译完成后立即保存到数据库，然后释放锁
-                                    let db_manager = app_state.db_manager.lock().await;
-                                    match db_manager.add_article(&article) {
-                                        Ok(true) => {
-                                            println!("New translated article from {}: {}", feed.name, article.title);
-                                        }
-                                        Ok(false) => {
-                                            // 文章已存在，忽略
-                                        }
-                                        Err(e) => {
-                                            eprintln!("Failed to add translated article: {}", e);
-                                        }
-                                    }
-                                }
-                                eprintln!("[AI] ===== 完成RSS源 {} 的文章翻译 ======", feed.name);
-                            }
-                        }
+                        tauri::async_runtime::spawn(async move {
+                            process_articles_sync(app_clone, feed_clone, articles_clone).await;
+                        });
                     },
                     Err(e) => {
-                        eprintln!("Failed to update feed in auto-update: {}", e);
+                        let error_msg = format!("{}", e);
+                        eprintln!("Failed to update feed {} ({}): {}", feed.name, feed.url, error_msg);
+                        
+                        // 更新feed的失败状态 - 立即释放锁
+                        if let Err(update_e) = {
+                            let mut db_manager = app_state.db_manager.lock().await;
+                            db_manager.update_feed_failure(feed.id, &error_msg)
+                        } {
+                            eprintln!("Failed to update feed failure status for {}: {}", feed.name, update_e);
+                        }
                     }
                 }
             }
+        } else {
+            println!("当前没有需要更新的RSS源，等待下次检查");
         }
         
         // 使用配置的更新间隔
-        println!("下次自动更新将在 {} 秒后进行", update_interval);
+        println!("下次自动更新检查将在 {} 秒后进行", update_interval);
         sleep(Duration::from_secs(update_interval)).await;
     }
+}
+
+// 异步处理文章保存和翻译 - 内部使用同步获取状态的版本
+async fn process_articles_sync(
+    app_handle: tauri::AppHandle,
+    feed: Feed,
+    articles: Vec<Article>
+) {
+    use chrono::{Utc};
+    
+    println!("开始处理来自 {} 的 {} 篇文章", feed.name, articles.len());
+    
+    // 分离需要翻译和不需要翻译的文章
+    let mut articles_to_translate = Vec::new();
+    let mut articles_to_save_directly = Vec::new();
+    
+    // 筛选需要翻译的文章 - 每次操作后释放锁
+    {   
+        // 获取应用状态
+        let app_state = app_handle.state::<AppState>();
+        
+        for article in articles {
+            if feed.translate_enabled {
+                let needs_translation = match {
+                    let db_manager = app_state.db_manager.lock().await;
+                    db_manager.article_needs_translation(article.feed_id, &article.link)
+                } {
+                    Ok(needs) => needs,
+                    Err(e) => {
+                        eprintln!("Failed to check if article needs translation: {}", e);
+                        // 查询失败，默认需要翻译
+                        true
+                    }
+                };
+                
+                if needs_translation {
+                    articles_to_translate.push(article.clone());
+                } else {
+                    articles_to_save_directly.push(article.clone());
+                }
+            } else {
+                articles_to_save_directly.push(article.clone());
+            }
+        }
+    }
+    
+    // 保存不需要翻译的文章 - 缩短锁持有时间
+    {   
+        // 获取应用状态
+        let app_state = app_handle.state::<AppState>();
+        
+        for article in articles_to_save_directly {
+            match {
+                let mut db_manager = app_state.db_manager.lock().await;
+                db_manager.add_article(&article)
+            } {
+                Ok(true) => {
+                    // 发送新文章通知
+                    send_new_article_notification(&app_handle, &feed.name, &article.title, article.translated_title.as_deref(), feed.notification_enabled);
+                },
+                Ok(false) => {
+                    // 文章已存在，忽略
+                },
+                Err(e) => {
+                    eprintln!("Failed to add article from {}: {}", feed.name, e);
+                }
+            }
+        }
+    }
+    
+    // 处理需要翻译的文章
+    if !articles_to_translate.is_empty() && feed.translate_enabled {
+        // 调用翻译处理函数，重新获取应用状态
+        handle_article_translation(app_handle, articles_to_translate, &feed).await;
+    }
+    
+    println!("完成处理来自 {} 的文章", feed.name);
+}
+
+// 异步处理文章保存和翻译
+async fn process_articles(
+    app_handle: tauri::AppHandle,
+    app_state: tauri::State<'static, AppState>,
+    feed: Feed,
+    articles: Vec<Article>
+) {
+    use chrono::{Utc};
+    
+    println!("开始处理来自 {} 的 {} 篇文章", feed.name, articles.len());
+    
+    // 分离需要翻译和不需要翻译的文章
+    let mut articles_to_translate = Vec::new();
+    let mut articles_to_save_directly = Vec::new();
+    
+    // 筛选需要翻译的文章 - 每次操作后释放锁
+    for article in articles {
+        if feed.translate_enabled {
+            let needs_translation = match {
+                let db_manager = app_state.db_manager.lock().await;
+                db_manager.article_needs_translation(article.feed_id, &article.link)
+            } {
+                Ok(needs) => needs,
+                Err(e) => {
+                    eprintln!("Failed to check if article needs translation: {}", e);
+                    // 查询失败，默认需要翻译
+                    true
+                }
+            };
+            
+            if needs_translation {
+                articles_to_translate.push(article.clone());
+            } else {
+                articles_to_save_directly.push(article.clone());
+            }
+        } else {
+            articles_to_save_directly.push(article.clone());
+        }
+    }
+    
+    // 保存不需要翻译的文章 - 缩短锁持有时间
+    for article in articles_to_save_directly {
+        match {
+            let mut db_manager = app_state.db_manager.lock().await;
+            db_manager.add_article(&article)
+        } {
+            Ok(true) => {
+                // 发送新文章通知
+                send_new_article_notification(&app_handle, &feed.name, &article.title, article.translated_title.as_deref(), feed.notification_enabled);
+            },
+            Ok(false) => {
+                // 文章已存在，忽略
+            },
+            Err(e) => {
+                eprintln!("Failed to add article from {}: {}", feed.name, e);
+            }
+        }
+    }
+    
+    // 处理需要翻译的文章
+    if !articles_to_translate.is_empty() && feed.translate_enabled {
+        handle_article_translation(app_handle, articles_to_translate, &feed).await;
+    }
+    
+    println!("完成处理来自 {} 的文章", feed.name);
+}
+
+
+
+// 异步处理文章翻译
+async fn handle_article_translation(
+    app_handle: tauri::AppHandle,
+    articles: Vec<Article>,
+    feed: &Feed
+) {
+    println!("[AI] 开始翻译来自 {} 的 {} 篇文章", feed.name, articles.len());
+    
+    // 获取应用状态
+    let app_state = app_handle.state::<AppState>();
+    
+    // 获取默认AI平台 - 缩短锁持有时间
+    let default_platform = match {
+        let db_manager = app_state.db_manager.lock().await;
+        db_manager.get_default_ai_platform()
+    } {
+        Ok(platform) => platform,
+        Err(e) => {
+            eprintln!("[AI] Failed to get default AI platform: {}", e);
+            None
+        }
+    };
+    
+    if let Some(platform) = default_platform {
+        // 获取AI翻译器实例
+        let translator = AI_TRANSLATOR.get_translator().await
+            .with_default_platform(Some(platform));
+        
+        // 逐个翻译文章并保存
+        for (index, mut article) in articles.into_iter().enumerate() {
+            println!("[AI] 翻译第 {} 篇文章: {}", index + 1, article.title);
+            
+            // 执行翻译
+            let translation_result = translator.translate_rss_content(
+                &article.title,
+                &article.content,
+                "zh-CN",
+            ).await;
+            
+            // 完全处理翻译结果，确保没有实现Send的错误对象不跨越await边界
+            match translation_result {
+                Ok((translated_title, translated_content)) => {
+                    // 更新文章翻译内容
+                    article.translated_title = Some(translated_title);
+                    article.translated_content = Some(translated_content);
+                    
+                    // 保存翻译后的文章 - 立即保存，不跨越await边界
+                    let article_clone = article.clone();
+                    let app_handle_clone = app_handle.clone();
+                    let feed_clone = feed.clone();
+                    
+                    // 异步保存翻译后的文章
+                    tauri::async_runtime::spawn(async move {
+                        let app_state = app_handle_clone.state::<AppState>();
+                        match {
+                            let mut db_manager = app_state.db_manager.lock().await;
+                            db_manager.add_article(&article_clone)
+                        } {
+                            Ok(true) => {
+                                send_new_article_notification(&app_handle_clone, &feed_clone.name, &article_clone.title, article_clone.translated_title.as_deref(), feed_clone.notification_enabled);
+                                println!("[AI] 成功翻译并保存文章: {}", article_clone.title);
+                            },
+                            Ok(false) => {
+                                println!("[AI] 文章已存在，跳过保存: {}", article_clone.title);
+                            },
+                            Err(e) => {
+                                eprintln!("[AI] Failed to save translated article: {}", e);
+                            }
+                        }
+                    });
+                },
+                Err(e) => {
+                    // 翻译失败，记录错误
+                    let error_msg = format!("{}", e);
+                    eprintln!("[AI] 翻译文章 {} 失败: {}", article.title, error_msg);
+                    
+                    // 保存原文 - 立即保存，不跨越await边界
+                    let article_clone = article.clone();
+                    let app_handle_clone = app_handle.clone();
+                    let feed_clone = feed.clone();
+                    
+                    // 异步保存原文
+                    tauri::async_runtime::spawn(async move {
+                        let app_state = app_handle_clone.state::<AppState>();
+                        match {
+                            let db_manager = app_state.db_manager.lock().await;
+                            db_manager.add_article(&article_clone)
+                        } {
+                            Ok(true) => {
+                                send_new_article_notification(&app_handle_clone, &feed_clone.name, &article_clone.title, article_clone.translated_title.as_deref(), feed_clone.notification_enabled);
+                                println!("[AI] 翻译失败，保存原文: {}", article_clone.title);
+                            },
+                            _ => {
+                                // 忽略已存在或保存失败的情况
+                            }
+                        }
+                    });
+                }
+            }
+        }
+    } else {
+        // 没有默认AI平台，保存原文
+        eprintln!("[AI] 没有配置默认AI平台，保存原文");
+        for article in articles {
+            match {
+                let mut db_manager = app_state.db_manager.lock().await;
+                db_manager.add_article(&article)
+            } {
+                Ok(true) => {
+                    send_new_article_notification(&app_handle, &feed.name, &article.title, article.translated_title.as_deref(), feed.notification_enabled);
+                },
+                _ => {
+                    // 忽略已存在或保存失败的情况
+                }
+            }
+        }
+    }
+    
+    println!("[AI] 完成翻译来自 {} 的文章", feed.name);
 }
 
 /// 获取配置文件路径
@@ -1213,9 +1495,11 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(AppState {
             db_manager: Mutex::new(db_manager),
             rss_updater: Mutex::new(rss_updater),
+            config_cache: Mutex::new(None),
         })
         // 添加应用启动事件处理，在应用启动后启动自动更新任务
         .setup(|app| {

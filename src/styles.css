@@ -1274,9 +1274,9 @@ body {
   background-color: var(--bg-primary);
   border-radius: var(--border-radius-lg);
   width: 90%;
-  max-width: 900px;
+  max-width: 1200px;
   height: 80%;
-  max-height: 700px;
+  max-height: 900px;
   display: flex;
   flex-direction: column;
   box-shadow: var(--shadow-lg);
@@ -1331,7 +1331,7 @@ body {
 }
 
 .ai-platform-selector {
-  width: 220px;
+  width: 200px;
   padding: 1rem;
   border-right: 1px solid var(--border-color);
   background-color: var(--bg-primary);
@@ -1377,7 +1377,7 @@ body {
 .chat-message {
   display: flex;
   gap: 0.75rem;
-  max-width: 85%;
+  max-width: 95%;
   animation: fadeIn 0.3s ease;
 }
 
