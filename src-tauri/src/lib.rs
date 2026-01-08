@@ -1,9 +1,14 @@
 use std::fs;
+use std::path::Path;
 use tauri::{State, Emitter, Manager, async_runtime::Mutex};
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_notification::NotificationExt;
 use serde::{Deserialize, Serialize};
 use toml::from_str;
+use uuid::Uuid;
+use std::time::SystemTime;
+use std::fs::{read_dir, File};
+use std::io::{Read, Write};
 
 // 导入自定义模块
 mod models;
@@ -50,11 +55,28 @@ struct ConfigCache {
     last_modified: std::time::SystemTime,
 }
 
+/// 聊天会话数据结构
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ChatSession {
+    pub id: String,
+    pub name: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub messages: Vec<crate::ai_translator::ChatMessage>,
+}
+
 // 应用状态
 struct AppState {
     db_manager: Mutex<DbManager>,
     rss_updater: Mutex<RssUpdater>,
     config_cache: Mutex<Option<ConfigCache>>,
+}
+
+/// 安全截取字符串，确保不会在字符中间截断
+fn safe_truncate(s: &str, max_len: usize) -> String {
+    s.chars()
+        .take(max_len)
+        .collect()
 }
 
 /// 异步发送新文章通知（不阻塞主线程）
@@ -69,14 +91,14 @@ fn send_new_article_notification(app: &tauri::AppHandle, feed_name: &str, articl
     let display_title = match translated_title {
         Some(translated) if !translated.is_empty() => {
             if translated.len() > 50 {
-                translated[..50].to_string()
+                safe_truncate(translated, 50)
             } else {
                 translated.to_string()
             }
         }
         _ => {
             if article_title.len() > 50 {
-                article_title[..50].to_string()
+                safe_truncate(article_title, 50)
             } else {
                 article_title.to_string()
             }
@@ -765,6 +787,168 @@ async fn update_update_interval(app_state: State<'_, AppState>, interval: u64) -
     });
     
     Ok(())
+}
+
+// 辅助函数：获取聊天会话目录路径
+fn get_chat_sessions_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    // 获取应用数据目录
+    let app_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data directory: {}", e))?;
+    let chat_dir = app_dir.join("chat_sessions");
+    
+    // 创建目录如果不存在
+    if let Err(e) = fs::create_dir_all(&chat_dir) {
+        return Err(format!("Failed to create chat sessions directory: {}", e));
+    }
+    
+    Ok(chat_dir)
+}
+
+// Tauri命令：创建新的聊天会话
+#[tauri::command(async)]
+async fn create_chat_session(app: tauri::AppHandle, name: Option<String>) -> Result<ChatSession, String> {
+    let chat_dir = get_chat_sessions_dir(&app)?;
+    let session_id = Uuid::new_v4().to_string();
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(|e| format!("Failed to get current time: {}", e))?
+        .as_secs();
+    
+    let session = ChatSession {
+        id: session_id.clone(),
+        name: name.unwrap_or_else(|| format!("新会话 {}", now)),
+        created_at: now,
+        updated_at: now,
+        messages: Vec::new(),
+    };
+    
+    // 保存会话到文件
+    let session_path = chat_dir.join(format!("{}.json", session_id));
+    let session_json = serde_json::to_string_pretty(&session).map_err(|e| format!("Failed to serialize session: {}", e))?;
+    
+    fs::write(session_path, session_json).map_err(|e| format!("Failed to write session file: {}", e))?;
+    
+    Ok(session)
+}
+
+// Tauri命令：获取所有聊天会话列表
+#[tauri::command(async)]
+async fn get_chat_sessions(app: tauri::AppHandle) -> Result<Vec<ChatSession>, String> {
+    let chat_dir = get_chat_sessions_dir(&app)?;
+    let mut sessions = Vec::new();
+    
+    // 读取目录中的所有会话文件
+    let entries = read_dir(chat_dir).map_err(|e| format!("Failed to read chat sessions directory: {}", e))?;
+    
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+        let path = entry.path();
+        
+        // 只处理.json文件
+        if let Some(extension) = path.extension() {
+            if extension == "json" {
+                // 读取文件内容
+                let mut file = File::open(&path).map_err(|e| format!("Failed to open session file: {}", e))?;
+                let mut contents = String::new();
+                file.read_to_string(&mut contents).map_err(|e| format!("Failed to read session file: {}", e))?;
+                
+                // 解析JSON
+                let session: ChatSession = serde_json::from_str(&contents).map_err(|e| format!("Failed to parse session file: {}", e))?;
+                sessions.push(session);
+            }
+        }
+    }
+    
+    // 按更新时间排序，最新的在前
+    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    
+    Ok(sessions)
+}
+
+// Tauri命令：获取指定会话的详细内容
+#[tauri::command(async,rename_all = "camelCase")]
+async fn get_chat_session(app: tauri::AppHandle, session_id: String) -> Result<ChatSession, String> {
+    let chat_dir = get_chat_sessions_dir(&app)?;
+    let session_path = chat_dir.join(format!("{}.json", session_id));
+    
+    // 检查文件是否存在
+    if !session_path.exists() {
+        return Err(format!("Session not found: {}", session_id));
+    }
+    
+    // 读取文件内容
+    let mut file = File::open(&session_path).map_err(|e| format!("Failed to open session file: {}", e))?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).map_err(|e| format!("Failed to read session file: {}", e))?;
+    
+    // 解析JSON
+    let session: ChatSession = serde_json::from_str(&contents).map_err(|e| format!("Failed to parse session file: {}", e))?;
+    
+    Ok(session)
+}
+
+// Tauri命令：保存聊天会话内容
+#[tauri::command(async,rename_all = "camelCase")]
+async fn save_chat_session(app: tauri::AppHandle, session: ChatSession) -> Result<(), String> {
+    let chat_dir = get_chat_sessions_dir(&app)?;
+    let session_path = chat_dir.join(format!("{}.json", session.id));
+    
+    // 更新会话的更新时间
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(|e| format!("Failed to get current time: {}", e))?
+        .as_secs();
+    
+    let mut updated_session = session;
+    updated_session.updated_at = now;
+    
+    // 保存会话到文件
+    let session_json = serde_json::to_string_pretty(&updated_session).map_err(|e| format!("Failed to serialize session: {}", e))?;
+    
+    fs::write(session_path, session_json).map_err(|e| format!("Failed to write session file: {}", e))?;
+    
+    Ok(())
+}
+
+// Tauri命令：删除聊天会话
+#[tauri::command(async,rename_all = "camelCase")]
+async fn delete_chat_session(app: tauri::AppHandle, session_id: String) -> Result<(), String> {
+    let chat_dir = get_chat_sessions_dir(&app)?;
+    let session_path = chat_dir.join(format!("{}.json", session_id));
+    
+    // 删除文件
+    fs::remove_file(session_path).map_err(|e| format!("Failed to delete session file: {}", e))?;
+    
+    Ok(())
+}
+
+// Tauri命令：更新聊天会话信息
+#[tauri::command(async,rename_all = "camelCase")]
+async fn update_chat_session(app: tauri::AppHandle, session_id: String, name: String) -> Result<ChatSession, String> {
+    // 获取当前会话
+    let mut session = get_chat_session(app.clone(), session_id.clone()).await?;
+    
+    // 更新会话信息
+    session.name = name;
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(|e| format!("Failed to get current time: {}", e))?
+        .as_secs();
+    session.updated_at = now;
+    
+    // 保存更新后的会话
+    save_chat_session(app, session.clone()).await?;
+    
+    Ok(session)
+}
+
+// Tauri命令：获取最新的聊天会话
+#[tauri::command(async)]
+async fn get_latest_chat_session(app: tauri::AppHandle) -> Result<Option<ChatSession>, String> {
+    let sessions = get_chat_sessions(app).await?;
+    Ok(sessions.into_iter().next())
 }
 
 // Tauri命令：AI聊天（流式）
@@ -1554,7 +1738,14 @@ pub fn run() {
             delete_article,
             open_link,
             update_update_interval,
-            ai_chat
+            ai_chat,
+            create_chat_session,
+            get_chat_sessions,
+            get_chat_session,
+            save_chat_session,
+            delete_chat_session,
+            update_chat_session,
+            get_latest_chat_session
         ))
         .run(tauri::generate_context!())
         .expect("Error running app");

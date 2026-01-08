@@ -56,20 +56,15 @@ pub struct ImageUrl {
     pub url: String,
 }
 
+// 简化ChatMessageContent，直接使用字符串类型
+pub type ChatMessageContent = String;
+
 /// AI聊天请求消息
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChatMessage {
     pub role: String,
     pub content: ChatMessageContent,
-}
-
-/// AI聊天消息内容（支持多种格式）
-#[derive(Debug, Clone)]
-pub enum ChatMessageContent {
-    /// 简单文本格式
-    Text(String),
-    /// 多部分内容格式（支持文本+图像）
-    Multipart(Vec<MessageContentItem>),
+    pub timestamp: Option<String>,
 }
 
 /// AI聊天请求
@@ -82,86 +77,13 @@ pub struct ChatRequest {
     pub stream: bool,
 }
 
-// 为ChatMessageContent实现自定义序列化，以便兼容OpenAI API格式
-impl Serialize for ChatMessageContent {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        match self {
-            // 简单文本格式：直接序列化为字符串
-            ChatMessageContent::Text(text) => {
-                serializer.serialize_str(text)
-            },
-            // 多部分内容格式：序列化为对象数组
-            ChatMessageContent::Multipart(items) => {
-                use serde::ser::SerializeSeq;
-                let mut seq = serializer.serialize_seq(Some(items.len()))?;
-                for item in items {
-                    seq.serialize_element(item)?;
-                }
-                seq.end()
-            },
-        }
-    }
-}
-
-// 为ChatMessageContent实现自定义反序列化，以便兼容OpenAI API格式
-impl<'de> Deserialize<'de> for ChatMessageContent {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        // 定义访客结构体
-        struct ChatMessageContentVisitor;
-        
-        impl<'de> serde::de::Visitor<'de> for ChatMessageContentVisitor {
-            type Value = ChatMessageContent;
-            
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("string or array of message content items")
-            }
-            
-            // 处理字符串类型（简单文本格式）
-            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                Ok(ChatMessageContent::Text(v.to_string()))
-            }
-            
-            // 处理字符串类型（另一种情况）
-            fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                Ok(ChatMessageContent::Text(v))
-            }
-            
-            // 处理序列类型（多部分内容格式）
-            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-            where
-                A: serde::de::SeqAccess<'de>,
-            {
-                let mut items = Vec::new();
-                
-                // 遍历序列中的每个元素
-                while let Some(item) = seq.next_element::<MessageContentItem>()? {
-                    items.push(item);
-                }
-                
-                Ok(ChatMessageContent::Multipart(items))
-            }
-        }
-        
-        // 使用访客模式进行反序列化
-        deserializer.deserialize_any(ChatMessageContentVisitor)
-    }
-}
-
 /// AI聊天响应片段（流式）
 #[derive(Debug, Deserialize)]
 pub struct ChatStreamResponse {
+    pub id: Option<String>,
+    pub object: Option<String>,
+    pub created: Option<u64>,
+    pub model: Option<String>,
     pub choices: Vec<ChatStreamChoice>,
 }
 
@@ -180,7 +102,14 @@ pub struct ChatStreamDelta {
     pub content: Option<String>,
 }
 
-/// AI翻译器
+/// 安全截取字符串，确保不会在字符中间截断
+fn safe_truncate(s: &str, max_len: usize) -> String {
+    s.chars()
+        .take(max_len)
+        .collect()
+}
+
+/// AI翻译器结构体
 #[derive(Debug, Clone)]
 pub struct AITranslator {
     client: Client,
@@ -256,7 +185,8 @@ impl AITranslator {
             model: platform.api_model,
             messages: vec![ChatMessage {
                 role: "user".to_string(),
-                content: ChatMessageContent::Text(prompt),
+                content: prompt,
+                timestamp: None,
             }],
             max_tokens: self.config.max_tokens,
             temperature: self.config.temperature,
@@ -463,6 +393,9 @@ impl AITranslator {
         let mut buffer = Vec::new();
         let mut total_received = 0;
         let mut total_sent = 0;
+        
+        // 设置最大缓冲区大小为10MB，避免内存溢出
+        const MAX_BUFFER_SIZE: usize = 10 * 1024 * 1024;
 
         eprintln!("[AI] 开始接收流式数据...");
 
@@ -470,6 +403,18 @@ impl AITranslator {
             let chunk = chunk_result?;
             total_received += chunk.len();
             eprintln!("[AI] 收到数据块: {} 字节, 累计: {}", chunk.len(), total_received);
+            
+            // 检查缓冲区大小，避免内存溢出
+            if buffer.len() + chunk.len() > MAX_BUFFER_SIZE {
+                eprintln!("[AI] 警告: 缓冲区即将超过最大限制，当前大小: {} 字节, 最大限制: {} 字节", 
+                          buffer.len(), MAX_BUFFER_SIZE);
+                
+                // 如果缓冲区已满，尝试清理已处理的数据或报错
+                if buffer.len() > MAX_BUFFER_SIZE {
+                    eprintln!("[AI] 错误: 缓冲区已超过最大限制，无法继续处理更多数据");
+                    return Err("Buffer overflow: Maximum buffer size exceeded".into());
+                }
+            }
 
             buffer.extend_from_slice(&chunk);
 
@@ -495,19 +440,26 @@ impl AITranslator {
                     }
 
                     if let Some(json_str) = trimmed_line.strip_prefix("data: ") {
-                        match serde_json::from_str::<ChatStreamResponse>(json_str) {
-                            Ok(stream_response) => {
-                                for choice in stream_response.choices {
-                                    if let Some(content) = choice.delta.content {
-                                        match tx.send(content.clone()).await {
-                                            Ok(_) => {
-                                                total_sent += 1;
-                                                // 添加短暂延迟，避免发送过快导致前端无法响应
-                                                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                                            }
-                                            Err(e) => {
-                                                eprintln!("[AI] 发送内容片段失败: {}", e);
-                                                return Err(format!("Failed to send content: {}", e).into());
+                        // 首先尝试使用灵活的Value类型解析，以处理各种响应格式
+                        match serde_json::from_str::<serde_json::Value>(json_str) {
+                            Ok(json_value) => {
+                                // 使用模式匹配安全地提取choices字段
+                                if let Some(choices) = json_value.get("choices").and_then(|c| c.as_array()) {
+                                    for choice in choices {
+                                        // 安全地提取delta和content字段
+                                        if let Some(delta) = choice.get("delta") {
+                                            if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
+                                                match tx.send(content.to_string()).await {
+                                                    Ok(_) => {
+                                                        total_sent += 1;
+                                                        // 添加短暂延迟，避免发送过快导致前端无法响应
+                                                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                                                    }
+                                                    Err(e) => {
+                                                        eprintln!("[AI] 发送内容片段失败: {}", e);
+                                                        return Err(format!("Failed to send content: {}", e).into());
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -515,11 +467,19 @@ impl AITranslator {
                             }
                             Err(e) => {
                                 eprintln!("[AI] 解析JSON失败: {}, 原始字符串长度: {}", e, json_str.len());
-                                if json_str.len() < 200 {
-                                    eprintln!("[AI] 原始字符串: {}", json_str);
+                                // 记录更详细的错误信息，包括原始字符串的前500个字符
+                                let log_str = safe_truncate(json_str, 500);
+                                eprintln!("[AI] 原始字符串前500字符: {}", log_str);
+                                
+                                // 检查是否是结束标记
+                                if trimmed_line != "data: [DONE]" {
+                                    eprintln!("[AI] 注意: 跳过无效的JSON行");
                                 }
                             }
                         }
+                    } else {
+                        // 记录非预期格式的行，便于调试
+                        eprintln!("[AI] 收到非预期格式行: {}", trimmed_line);
                     }
                 } else {
                     break;

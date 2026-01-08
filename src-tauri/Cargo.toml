@@ -38,3 +38,4 @@ headless_chrome = { version = "1.0.20", features = ["fetch"] }
 html-escape = "0.2.13"
 url = "2.5.2"
 futures = "0.3"
+uuid = { version = "1.11.0", features = ["v4", "serde"] }

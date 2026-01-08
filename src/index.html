@@ -392,20 +392,29 @@
         <div class="ai-chat-header">
           <h2>AI聊天</h2>
           <div class="ai-chat-actions">
+            <div class="ai-platform-selector-header">
+              <select id="ai-platform-select">
+                <!-- 动态生成AI平台选项 -->
+              </select>
+            </div>
+            <button id="new-chat-btn">+ 新会话</button>
             <button id="clear-chat-btn">🗑️ 清除记录</button>
             <span class="close">&times;</span>
           </div>
         </div>
         <div class="ai-chat-main">
-          <!-- 左侧：AI平台选择 -->
-          <div class="ai-platform-selector">
-            <h3>AI平台</h3>
-            <select id="ai-platform-select">
-              <!-- 动态生成AI平台选项 -->
-            </select>
+          <!-- 左侧：会话列表 -->
+          <div class="chat-sessions-list">
+            <div class="chat-sessions-header">
+              <h3>会话</h3>
+              <button id="add-session-btn" class="add-session-btn">+</button>
+            </div>
+            <div class="sessions-container" id="sessions-container">
+              <!-- 动态生成会话列表 -->
+            </div>
           </div>
           
-          <!-- 中间：聊天消息区 -->
+          <!-- 右侧：聊天消息区 -->
           <div class="ai-chat-messages" id="ai-chat-messages">
             <!-- 动态生成聊天消息 -->
           </div>

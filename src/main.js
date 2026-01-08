@@ -2085,8 +2085,8 @@ window.addEventListener('DOMContentLoaded', async () => {
   });
   
   // 监听AI聊天响应事件
-  await listen('ai_chat_response', (event) => {
-    handleChatResponse(event.payload);
+  await listen('ai_chat_response', async (event) => {
+    await handleChatResponse(event.payload);
   });
   
   // 监听AI聊天结束事件
@@ -2111,8 +2111,9 @@ let sendChatBtn;
 let clearChatBtn;
 let aiPlatformSelect;
 let chatHistory = [];
+let chatSessions = [];
+let currentSession = null;
 const MAX_CONTEXT_SIZE = 8192;
-const CHAT_HISTORY_KEY = 'ai_chat_history';
 
 // 文件上传功能
 let fileUploadBtn;
@@ -2120,38 +2121,316 @@ let fileUpload;
 let filePreviewArea;
 let uploadedFiles = [];
 
-// 从localStorage加载聊天记录
-function loadChatHistory() {
+// 会话管理DOM元素
+let sessionsContainer;
+let newChatBtn;
+let addSessionBtn;
+
+// 从后端加载所有聊天会话
+async function loadChatSessions() {
   try {
-    const savedHistory = localStorage.getItem(CHAT_HISTORY_KEY);
-    if (savedHistory) {
-      const parsedHistory = JSON.parse(savedHistory);
-      // 恢复日期对象
-      chatHistory = parsedHistory.map(msg => ({
+    const sessions = await invoke('get_chat_sessions');
+    chatSessions = sessions.map(session => ({
+      ...session,
+      created_at: new Date(session.created_at * 1000),
+      updated_at: new Date(session.updated_at * 1000),
+      messages: session.messages.map(msg => ({
         ...msg,
-        timestamp: new Date(msg.timestamp)
-      }));
+        timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date()
+      }))
+    }));
+    
+    // 如果没有会话，创建一个新会话
+    if (chatSessions.length === 0) {
+      currentSession = await createChatSession();
+    } else {
+      // 获取最新的会话
+      const latestSession = await invoke('get_latest_chat_session');
+      if (latestSession) {
+        currentSession = {
+          ...latestSession,
+          created_at: new Date(latestSession.created_at * 1000),
+          updated_at: new Date(latestSession.updated_at * 1000),
+          messages: latestSession.messages.map(msg => ({
+            ...msg,
+            timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date()
+          }))
+        };
+      } else {
+        currentSession = chatSessions[0];
+      }
     }
+    
+    // 加载当前会话的聊天历史
+    chatHistory = currentSession.messages || [];
+    
+    // 更新会话列表界面
+    updateSessionList();
   } catch (error) {
-    console.error('加载聊天记录失败:', error);
-    chatHistory = [];
+    console.error('加载聊天会话失败:', error);
+    chatSessions = [];
+    currentSession = await createChatSession();
   }
 }
 
-// 保存聊天记录到localStorage
-function saveChatHistory() {
+// 创建新的聊天会话
+async function createChatSession(name) {
   try {
-    localStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(chatHistory));
+    const session = await invoke('create_chat_session', { name });
+    const newSession = {
+      ...session,
+      created_at: new Date(session.created_at * 1000),
+      updated_at: new Date(session.updated_at * 1000),
+      messages: []
+    };
+    
+    chatSessions.unshift(newSession);
+    currentSession = newSession;
+    chatHistory = [];
+    
+    // 更新会话列表界面
+    updateSessionList();
+    updateChatMessages();
+    
+    return newSession;
   } catch (error) {
-    console.error('保存聊天记录失败:', error);
+    console.error('创建会话失败:', error);
+    return null;
   }
+}
+
+// 切换聊天会话
+async function switchChatSession(sessionId) {
+  try {
+    // 保存当前会话
+    if (currentSession) {
+      await saveChatSession();
+    }
+    
+    // 查找要切换的会话
+    const session = chatSessions.find(s => s.id === sessionId);
+    if (session) {
+      currentSession = session;
+      chatHistory = session.messages || [];
+      
+      // 更新会话列表界面
+      updateSessionList();
+      updateChatMessages();
+    }
+  } catch (error) {
+    console.error('切换会话失败:', error);
+  }
+}
+
+// 保存当前聊天会话
+async function saveChatSession() {
+  try {
+    if (currentSession) {
+      // 转换聊天消息格式，适配后端预期的格式
+      const convertedMessages = chatHistory.map(msg => {
+        // 转换消息内容，将前端格式转换为后端格式
+        let content;
+        if (typeof msg.content === 'string') {
+          // 普通文本消息
+          content = msg.content;
+        } else {
+          // 包含文本和文件的消息，只保留文本内容
+          content = msg.content.text || '';
+        }
+        
+        return {
+          role: msg.role,
+          content: content,
+          timestamp: msg.timestamp.toISOString()
+        };
+      });
+      
+      // 更新会话的消息和更新时间
+      const sessionToSave = {
+        ...currentSession,
+        messages: convertedMessages,
+        updated_at: new Date()
+      };
+      
+      // 保存到后端
+      await invoke('save_chat_session', {
+        session: {
+          ...sessionToSave,
+          created_at: Math.floor(sessionToSave.created_at.getTime() / 1000),
+          updated_at: Math.floor(sessionToSave.updated_at.getTime() / 1000)
+        }
+      });
+      
+      // 更新会话列表界面
+      updateSessionList();
+    }
+  } catch (error) {
+    console.error('保存会话失败:', error);
+  }
+}
+
+// 删除聊天会话
+async function deleteChatSession(sessionId) {
+  try {
+    // 确认删除
+    if (!confirm('确定要删除这个会话吗？')) {
+      return;
+    }
+    
+    // 从后端删除会话
+    await invoke('delete_chat_session', { sessionId: sessionId });
+    
+    // 从本地会话列表中移除
+    const sessionIndex = chatSessions.findIndex(s => s.id === sessionId);
+    if (sessionIndex !== -1) {
+      chatSessions.splice(sessionIndex, 1);
+    }
+    
+    // 如果删除的是当前会话，切换到其他会话
+    if (currentSession && currentSession.id === sessionId) {
+      if (chatSessions.length > 0) {
+        currentSession = chatSessions[0];
+        chatHistory = currentSession.messages || [];
+      } else {
+        currentSession = await createChatSession();
+        chatHistory = [];
+      }
+    }
+    
+    // 更新会话列表界面
+    updateSessionList();
+    updateChatMessages();
+  } catch (error) {
+    console.error('删除会话失败:', error);
+  }
+}
+
+// 更新聊天会话列表界面
+function updateSessionList() {
+  if (!sessionsContainer) return;
+  
+  // 清空会话列表
+  sessionsContainer.innerHTML = '';
+  
+  // 渲染每个会话
+  chatSessions.forEach(session => {
+    const sessionItem = document.createElement('div');
+    sessionItem.className = `session-item ${currentSession && currentSession.id === session.id ? 'active' : ''}`;
+    sessionItem.dataset.sessionId = session.id;
+    
+    // 会话名称元素
+    const sessionName = document.createElement('div');
+    sessionName.className = 'session-name';
+    sessionName.textContent = session.name;
+    
+    // 会话操作按钮容器
+    const sessionActions = document.createElement('div');
+    sessionActions.className = 'session-actions';
+    
+    // 编辑会话按钮
+    const editBtn = document.createElement('button');
+    editBtn.className = 'session-action-btn';
+    editBtn.innerHTML = '✏️';
+    editBtn.title = '编辑会话名称';
+    editBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      editSessionName(session.id);
+    });
+    
+    // 删除会话按钮
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'session-action-btn delete';
+    deleteBtn.innerHTML = '🗑️';
+    deleteBtn.title = '删除会话';
+    deleteBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      deleteChatSession(session.id);
+    });
+    
+    // 添加操作按钮
+    sessionActions.appendChild(editBtn);
+    sessionActions.appendChild(deleteBtn);
+    
+    // 添加点击事件，切换会话
+    sessionItem.addEventListener('click', () => {
+      switchChatSession(session.id);
+    });
+    
+    // 组装会话项
+    sessionItem.appendChild(sessionName);
+    sessionItem.appendChild(sessionActions);
+    
+    // 添加到会话列表
+    sessionsContainer.appendChild(sessionItem);
+  });
+}
+
+// 编辑会话名称
+function editSessionName(sessionId) {
+  const session = chatSessions.find(s => s.id === sessionId);
+  if (!session) return;
+  
+  const sessionItem = document.querySelector(`.session-item[data-session-id="${sessionId}"]`);
+  const sessionNameElement = sessionItem.querySelector('.session-name');
+  
+  // 创建输入框
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'session-name editing';
+  input.value = session.name;
+  input.maxLength = 50;
+  
+  // 替换文本为输入框
+  sessionItem.replaceChild(input, sessionNameElement);
+  
+  // 自动聚焦并选中文本
+  input.focus();
+  input.select();
+  
+  // 处理输入框事件
+  const handleBlur = async () => {
+    const newName = input.value.trim();
+    if (newName && newName !== session.name) {
+      try {
+        // 更新会话名称
+        const updatedSession = await invoke('update_chat_session', {
+          sessionId: sessionId,
+          name: newName
+        });
+        
+        // 更新本地会话数据
+        session.name = newName;
+        session.updated_at = new Date();
+        
+        // 更新会话列表界面
+        updateSessionList();
+      } catch (error) {
+        console.error('更新会话名称失败:', error);
+        // 恢复原名称
+        input.value = session.name;
+      }
+    }
+    
+    // 恢复文本显示
+    updateSessionList();
+  };
+  
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter') {
+      handleBlur();
+    } else if (e.key === 'Escape') {
+      // 取消编辑，恢复原名称
+      updateSessionList();
+    }
+  };
+  
+  // 添加事件监听器
+  input.addEventListener('blur', handleBlur);
+  input.addEventListener('keydown', handleKeyDown);
 }
 
 // 初始化AI聊天功能
 function initAIChat() {
-  // 加载聊天记录
-  loadChatHistory();
-  
   // 获取DOM元素
   aiChatModal = document.getElementById('ai-chat-modal');
   aiChatBtn = document.getElementById('ai-chat-btn');
@@ -2159,7 +2438,10 @@ function initAIChat() {
   aiChatInput = document.getElementById('ai-chat-input');
   sendChatBtn = document.getElementById('send-chat-btn');
   clearChatBtn = document.getElementById('clear-chat-btn');
+  newChatBtn = document.getElementById('new-chat-btn');
   aiPlatformSelect = document.getElementById('ai-platform-select');
+  sessionsContainer = document.getElementById('sessions-container');
+  addSessionBtn = document.getElementById('add-session-btn');
   
   // 文件上传相关DOM元素
   fileUploadBtn = document.getElementById('file-upload-btn');
@@ -2170,11 +2452,13 @@ function initAIChat() {
   if (aiChatBtn) {
     aiChatBtn.addEventListener('click', async () => {
       aiChatModal.classList.add('show');
-    // 加载AI平台列表
-    await loadAIPlatformsToSelect();
-    // 初始化聊天界面
-    updateChatMessages();
-  });
+      // 加载AI平台列表
+      await loadAIPlatformsToSelect();
+      // 加载聊天会话
+      await loadChatSessions();
+      // 初始化聊天界面
+      updateChatMessages();
+    });
   }
   
   // 发送消息按钮点击事件
@@ -2196,8 +2480,24 @@ function initAIChat() {
   
   // 清理聊天记录按钮点击事件
   if (clearChatBtn) {
-    clearChatBtn.addEventListener('click', () => {
+    clearChatBtn.addEventListener('click', async () => {
       clearChatHistory();
+      // 保存清理后的会话
+      await saveChatSession();
+    });
+  }
+  
+  // 新会话按钮点击事件
+  if (newChatBtn) {
+    newChatBtn.addEventListener('click', async () => {
+      await createChatSession();
+    });
+  }
+  
+  // 添加会话按钮点击事件
+  if (addSessionBtn) {
+    addSessionBtn.addEventListener('click', async () => {
+      await createChatSession();
     });
   }
   
@@ -2210,8 +2510,10 @@ function initAIChat() {
   
   // 模态框外部点击关闭
   if (aiChatModal) {
-    aiChatModal.addEventListener('click', (e) => {
+    aiChatModal.addEventListener('click', async (e) => {
       if (e.target === aiChatModal) {
+        // 关闭前保存会话
+        await saveChatSession();
         aiChatModal.classList.remove('show');
       }
     });
@@ -2220,7 +2522,9 @@ function initAIChat() {
   // 关闭按钮点击事件
   const closeBtns = aiChatModal.querySelectorAll('.close');
   closeBtns.forEach(btn => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
+      // 关闭前保存会话
+      await saveChatSession();
       aiChatModal.classList.remove('show');
     });
   });
@@ -2407,8 +2711,8 @@ async function sendMessage() {
   // 更新聊天界面
   updateChatMessages();
   
-  // 保存聊天记录
-  saveChatHistory();
+  // 保存聊天记录到当前会话
+  await saveChatSession();
   
   // 清空输入框和文件列表
   aiChatInput.value = '';
@@ -2427,8 +2731,8 @@ async function sendMessage() {
   chatHistory.push(aiThinkingMsg);
   updateChatMessages();
   
-  // 保存聊天记录
-  saveChatHistory();
+  // 保存聊天记录到当前会话
+  await saveChatSession();
   
   // 构建聊天请求，过滤掉临时消息和转换角色
   const messages = chatHistory
@@ -2524,13 +2828,13 @@ async function sendMessage() {
     chatHistory[chatHistory.length - 1].content = errorMessage;
     updateChatMessages();
     
-    // 保存聊天记录
-    saveChatHistory();
+    // 保存聊天记录到当前会话
+    await saveChatSession();
   }
 }
 
 // 处理聊天响应
-function handleChatResponse(content) {
+async function handleChatResponse(content) {
   // 如果最后一条消息是AI正在思考，替换内容
   if (chatHistory.length > 0 && chatHistory[chatHistory.length - 1].role === 'ai') {
     if (chatHistory[chatHistory.length - 1].content === '正在思考...') {
@@ -2551,8 +2855,8 @@ function handleChatResponse(content) {
     });
   }
   updateChatMessages();
-  // 保存聊天记录
-  saveChatHistory();
+  // 保存聊天记录到当前会话
+  await saveChatSession();
 }
 
 // 更新聊天消息界面
@@ -2744,9 +3048,6 @@ function updateLastAIMessage() {
 function clearChatHistory() {
   chatHistory = [];
   updateChatMessages();
-  
-  // 保存聊天记录
-  saveChatHistory();
 }
 
 // 管理聊天上下文，确保不超过最大限制
