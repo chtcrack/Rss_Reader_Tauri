@@ -56,14 +56,11 @@ pub struct ImageUrl {
     pub url: String,
 }
 
-// 简化ChatMessageContent，直接使用字符串类型
-pub type ChatMessageContent = String;
-
 /// AI聊天请求消息
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChatMessage {
     pub role: String,
-    pub content: ChatMessageContent,
+    pub content: serde_json::Value,
     pub timestamp: Option<String>,
 }
 
@@ -185,7 +182,7 @@ impl AITranslator {
             model: platform.api_model,
             messages: vec![ChatMessage {
                 role: "user".to_string(),
-                content: prompt,
+                content: serde_json::Value::String(prompt),
                 timestamp: None,
             }],
             max_tokens: self.config.max_tokens,
