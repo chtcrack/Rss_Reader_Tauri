@@ -196,7 +196,10 @@ function initEventListeners() {
           group_id: feedGroup ? parseInt(feedGroup) : null,
           last_updated: null,
           translate_enabled: translateEnabled,
-          notification_enabled: notificationEnabled
+          notification_enabled: notificationEnabled,
+          last_update_status: null,
+          update_attempts: 0,
+          next_retry_time: null
         };
         
         await invoke('add_feed', { feed });
@@ -754,7 +757,10 @@ function initEventListeners() {
           group_id: feedGroup ? parseInt(feedGroup) : null,
           last_updated: null, // 由后端更新
           translate_enabled: translateEnabled,
-          notification_enabled: notificationEnabled
+          notification_enabled: notificationEnabled,
+          last_update_status: null,
+          update_attempts: 0,
+          next_retry_time: null
         };
         
         await invoke('update_feed', { feed });
