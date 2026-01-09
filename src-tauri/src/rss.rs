@@ -1,10 +1,9 @@
-use crate::ai_translator::{AI_TRANSLATOR, AITranslatorSingleton};  // 添加AI翻译器导入
 use crate::models::{Article, Feed};
 use async_trait::async_trait;
 use reqwest::{Client, StatusCode};
 use rss::{Channel, Item};
 use atom_syndication::{Feed as AtomFeed, Entry as AtomEntry};
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use tokio::time::Duration;
 use std::ffi::OsStr;
 use headless_chrome::{Browser, LaunchOptionsBuilder};
@@ -176,31 +175,21 @@ impl RssParser {
 
     /// 将RSS项转换为文章模型
     pub fn rss_item_to_article(&self, item: &Item, feed_id: i64, base_url: &str) -> Article {
-        let pub_date = item.pub_date().and_then(|d| {
-            chrono::DateTime::parse_from_rfc2822(d)
-                .ok()
-                .map(|dt| dt.into())
-        }).or_else(|| {
-            // 尝试从dc:date字段获取日期
-            item.extensions()
-                .iter()
-                // extensions()返回的是(&namespace, &elements_map)元组
-                // dc命名空间的完整URL是http://purl.org/dc/elements/1.1/
-                .find(|(ns, _)| *ns == "http://purl.org/dc/elements/1.1/")
-                .and_then(|(_, elements_map)| {
-                    elements_map.get("date")
-                        .and_then(|extensions| extensions.first())
-                })
-                .and_then(|date_ext| {
-                    // 使用value()方法获取Extension的内容
-                    date_ext.value()
-                })
-                .and_then(|date_str| {
-                    chrono::DateTime::parse_from_rfc3339(date_str)
-                        .ok()
-                        .map(|dt| dt.into())
-                })
-        }).unwrap_or_else(Utc::now);
+        let pub_date = item.pub_date()
+    .and_then(|d| chrono::DateTime::parse_from_rfc2822(d).ok().map(|dt| dt.into()))
+    .or_else(|| {
+        if let Some(dc) = item.dublin_core_ext() {
+            let dates = dc.dates();
+            if let Some(date_str) = dates.first() {
+                return DateTime::parse_from_rfc3339(date_str)
+                    .or_else(|_| DateTime::parse_from_str(date_str, "%Y-%m-%dT%H:%M:%S%z"))
+                    .ok()
+                    .map(|dt| dt.into());
+            }
+        }
+        None
+    })
+    .unwrap_or_else(Utc::now);
 
         let categories = item.categories().iter()
             .map(|c| c.name().to_string())
@@ -454,7 +443,7 @@ impl RssUpdater {
                     success_count += 1;
                     results.push(Ok((feed, articles)));
                 },
-                Ok((feed, Err(e))) => {
+                Ok((_feed, Err(e))) => {
                     failure_count += 1;
                     results.push(Err(e));
                 },

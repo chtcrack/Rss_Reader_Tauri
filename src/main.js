@@ -1886,16 +1886,16 @@ async function loadFilteredArticles(page = 1, size = pageSize, append = false) {
       articlesContainer.appendChild(articleItem);
     });
     
+    // 移除所有加载状态元素
+    const loadingElements = articlesContainer.querySelectorAll('.loading-state');
+    loadingElements.forEach(element => element.remove());
+    
     // 检查是否还有更多数据
     if (articles.length < size || offset + articles.length >= totalArticles) {
       hasMore = false;
-      // 移除所有加载状态元素
-      const loadingElements = articlesContainer.querySelectorAll('.loading-state');
-      loadingElements.forEach(element => element.remove());
     } else {
-      // 如果还有更多数据，确保只有一个加载状态元素
-      const existingLoadingElements = articlesContainer.querySelectorAll('.loading-state');
-      if (existingLoadingElements.length === 0) {
+      // 只有在追加模式且有更多数据时，才显示"正在加载更多"提示
+      if (append) {
         const loadingElement = document.createElement('div');
         loadingElement.className = 'loading-state';
         loadingElement.innerHTML = '<div class="loading-spinner-small"></div><span class="loading-text">正在加载更多…</span>';
@@ -2052,16 +2052,16 @@ async function performSearch(page = 1, size = pageSize, append = false) {
       articlesContainer.appendChild(articleItem);
     });
     
+    // 移除所有加载状态元素
+    const loadingElements = articlesContainer.querySelectorAll('.loading-state');
+    loadingElements.forEach(element => element.remove());
+    
     // 检查是否还有更多数据
     if (results.length < size || offset + results.length >= totalArticles) {
       hasMore = false;
-      // 移除所有加载状态元素
-      const loadingElements = articlesContainer.querySelectorAll('.loading-state');
-      loadingElements.forEach(element => element.remove());
     } else {
-      // 如果还有更多数据，确保只有一个加载状态元素
-      const existingLoadingElements = articlesContainer.querySelectorAll('.loading-state');
-      if (existingLoadingElements.length === 0) {
+      // 只有在追加模式且有更多数据时，才显示"正在加载更多"提示
+      if (append) {
         const loadingElement = document.createElement('div');
         loadingElement.className = 'loading-state';
         loadingElement.innerHTML = '<div class="loading-spinner-small"></div><span class="loading-text">正在加载更多…</span>';

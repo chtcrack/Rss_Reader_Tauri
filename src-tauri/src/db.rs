@@ -296,9 +296,9 @@ impl DbManager {
         let mut stmt = self.conn.prepare("SELECT id, name, url, group_id, last_updated, translate_enabled, notification_enabled, last_update_status, update_attempts, next_retry_time FROM feeds ORDER BY name")?;
         let feeds = stmt.query_map([], |row| {
             let last_updated = row.get::<_, Option<i64>>(4)?
-                .map(|ts| Utc.timestamp(ts, 0));
+                .and_then(|ts| Utc.timestamp_opt(ts, 0).single());
             let next_retry_time = row.get::<_, Option<i64>>(9)?
-                .map(|ts| Utc.timestamp(ts, 0));
+                .and_then(|ts| Utc.timestamp_opt(ts, 0).single());
             Ok(Feed {
                 id: row.get::<_, i64>(0)?,
                 name: row.get(1)?,
@@ -447,9 +447,9 @@ impl DbManager {
     /// 获取过滤条件下的文章总数
     pub fn get_filtered_article_count(&self, filter: &str, feed_id: Option<i64>) -> Result<u32> {
         let sql = match (feed_id, filter) {
-            (Some(id), "unread") => "SELECT COUNT(*) FROM articles WHERE feed_id = ? AND is_read = FALSE",
-            (Some(id), "favorite") => "SELECT COUNT(*) FROM articles WHERE feed_id = ? AND is_favorite = TRUE",
-            (Some(id), _) => "SELECT COUNT(*) FROM articles WHERE feed_id = ?",
+            (Some(_id), "unread") => "SELECT COUNT(*) FROM articles WHERE feed_id = ? AND is_read = FALSE",
+            (Some(_id), "favorite") => "SELECT COUNT(*) FROM articles WHERE feed_id = ? AND is_favorite = TRUE",
+            (Some(_id), _) => "SELECT COUNT(*) FROM articles WHERE feed_id = ?",
             (None, "unread") => "SELECT COUNT(*) FROM articles WHERE is_read = FALSE",
             (None, "favorite") => "SELECT COUNT(*) FROM articles WHERE is_favorite = TRUE",
             (None, _) => "SELECT COUNT(*) FROM articles",

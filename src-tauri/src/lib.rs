@@ -1,5 +1,4 @@
 use std::fs;
-use std::path::Path;
 use tauri::{State, Emitter, Manager, async_runtime::Mutex};
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_notification::NotificationExt;
@@ -8,7 +7,7 @@ use toml::from_str;
 use uuid::Uuid;
 use std::time::SystemTime;
 use std::fs::{read_dir, File};
-use std::io::{Read, Write};
+use std::io::Read;
 use chrono::Utc;
 
 // 导入自定义模块
@@ -133,7 +132,7 @@ async fn init_ai_translator(app_state: State<'_, AppState>) -> Result<(), String
     eprintln!("[AI] ===== 开始初始化AI翻译器 =====");
     // 获取默认AI平台
     let default_platform = {
-        let db_manager = app_state.db_manager.lock().await;
+        let mut db_manager = app_state.db_manager.lock().await;
         eprintln!("[AI] 成功锁定数据库管理器");
         
         // 先获取所有AI平台，查看是否有平台配置
@@ -168,7 +167,7 @@ async fn init_ai_translator(app_state: State<'_, AppState>) -> Result<(), String
 async fn update_single_feed(app: tauri::AppHandle, app_state: State<'_, AppState>, feed_id: i64) -> Result<(), String> {
     // 获取指定RSS源
     let mut feed = {
-        let db_manager = app_state.db_manager.lock().await;
+        let mut db_manager = app_state.db_manager.lock().await;
         db_manager.get_feed_by_id(feed_id).map_err(|e| {
             eprintln!("Failed to get feed: {}", e);
             format!("Failed to get feed: {}", e)
@@ -192,13 +191,13 @@ async fn update_single_feed(app: tauri::AppHandle, app_state: State<'_, AppState
     // 更新RSS源
     let rss_updater = RssUpdater::new();
     match rss_updater.update_feed(&feed).await {
-        Ok(mut articles) => {
+        Ok(articles) => {
             // 检查哪些文章需要翻译
             let mut articles_to_translate = Vec::new();
             let mut articles_to_save = Vec::new();
             
             {
-                let db_manager = app_state.db_manager.lock().await;
+                let mut db_manager = app_state.db_manager.lock().await;
                 
                 // 筛选需要翻译的文章
                 for article in articles {
@@ -223,7 +222,7 @@ async fn update_single_feed(app: tauri::AppHandle, app_state: State<'_, AppState
             // 保存不需要翻译的文章
             let mut new_article_count = 0;
             for article in articles_to_save {
-                let db_manager = app_state.db_manager.lock().await;
+                let mut db_manager = app_state.db_manager.lock().await;
                 
                 if let Ok(true) = db_manager.add_article(&article) {
                     new_article_count += 1;
@@ -238,7 +237,7 @@ async fn update_single_feed(app: tauri::AppHandle, app_state: State<'_, AppState
                 
                 // 从数据库获取默认AI平台
                 let default_platform = {
-                    let db_manager = app_state.db_manager.lock().await;
+                    let mut db_manager = app_state.db_manager.lock().await;
                     db_manager.get_default_ai_platform().map_err(|e| {
                         eprintln!("Failed to get default AI platform from database: {}", e);
                         format!("Failed to get default AI platform: {}", e)
@@ -276,7 +275,7 @@ async fn update_single_feed(app: tauri::AppHandle, app_state: State<'_, AppState
                     eprintln!("[AI] 完成第 {} 篇文章翻译", index + 1);
                     
                     // 翻译完成后立即保存到数据库，然后释放锁
-                    let db_manager = app_state.db_manager.lock().await;
+                    let mut db_manager = app_state.db_manager.lock().await;
                     if let Ok(true) = db_manager.add_article(&article) {
                         new_article_count += 1;
                         send_new_article_notification(&app, &feed.name, &article.title, article.translated_title.as_deref(), feed.notification_enabled);
@@ -343,7 +342,7 @@ async fn add_feed(app: tauri::AppHandle, app_state: State<'_, AppState>, feed: F
         let result = rss_updater.update_feed(&new_feed).await;
         
         // 处理更新结果
-        if let Ok(mut articles) = result {
+        if let Ok(articles) = result {
             // 获取应用实例和状态
             if let Some(window) = app_clone.get_webview_window("main") {
                 let app_handle = window.app_handle();
@@ -355,7 +354,7 @@ async fn add_feed(app: tauri::AppHandle, app_state: State<'_, AppState>, feed: F
                 
                 // 获取数据库锁并筛选需要翻译的文章
                 {
-                    let db_manager = app_state.db_manager.lock().await;
+                    let mut db_manager = app_state.db_manager.lock().await;
                     
                     // 筛选需要翻译的文章
                     for article in articles {
@@ -378,7 +377,7 @@ async fn add_feed(app: tauri::AppHandle, app_state: State<'_, AppState>, feed: F
                 // 保存不需要翻译的文章
                 let mut new_article_count = 0;
                 for article in articles_to_save {
-                    let db_manager = app_state.db_manager.lock().await;
+                    let mut db_manager = app_state.db_manager.lock().await;
                     
                     if let Ok(true) = db_manager.add_article(&article) {
                         new_article_count += 1;
@@ -393,7 +392,7 @@ async fn add_feed(app: tauri::AppHandle, app_state: State<'_, AppState>, feed: F
                     
                     // 从数据库获取默认AI平台
                     let default_platform = {
-                        let db_manager = app_state.db_manager.lock().await;
+                        let mut db_manager = app_state.db_manager.lock().await;
                         match db_manager.get_default_ai_platform() {
                             Ok(platform) => platform,
                             Err(e) => {
@@ -436,7 +435,7 @@ async fn add_feed(app: tauri::AppHandle, app_state: State<'_, AppState>, feed: F
                             eprintln!("[AI] 完成第 {} 篇文章翻译", index + 1);
                             
                             // 翻译完成后立即保存到数据库，然后释放锁
-                            let db_manager = app_state.db_manager.lock().await;
+                            let mut db_manager = app_state.db_manager.lock().await;
                             if let Ok(true) = db_manager.add_article(&article) {
                                 new_article_count += 1;
                                 send_new_article_notification(&app, &new_feed.name, &article.title, article.translated_title.as_deref(), new_feed.notification_enabled);
@@ -448,7 +447,7 @@ async fn add_feed(app: tauri::AppHandle, app_state: State<'_, AppState>, feed: F
                         eprintln!("[AI] 错误: 没有配置默认AI平台");
                         // 保存未翻译的文章，每篇独立获取和释放锁
                         for article in articles_to_translate {
-                            let db_manager = app_state.db_manager.lock().await;
+                            let mut db_manager = app_state.db_manager.lock().await;
                             if let Ok(true) = db_manager.add_article(&article) {
                                 new_article_count += 1;
                                 send_new_article_notification(&app, &new_feed.name, &article.title, article.translated_title.as_deref(), new_feed.notification_enabled);
@@ -1110,7 +1109,7 @@ async fn update_all_feeds(_app: tauri::AppHandle, app_state: State<'_, AppState>
     };
 
     // 保存总源数量，避免后续使用被移动的all_feeds
-    let total_feeds_count = all_feeds.len();
+    let _total_feeds_count = all_feeds.len();
     
     // 筛选需要更新的RSS源：
     // 1. 没有失败记录的源
@@ -1148,7 +1147,7 @@ async fn update_all_feeds(_app: tauri::AppHandle, app_state: State<'_, AppState>
                 // 保存当前RSS源的所有文章
                 for article in articles {
                     // 为每篇文章独立获取和释放锁，减少锁持有时间
-                    let mut db_manager = app_state.db_manager.lock().await;
+                    let db_manager = app_state.db_manager.lock().await;
                     // 尝试添加文章，如果成功则说明是新文章
                     match db_manager.add_article(&article) {
                         Ok(true) => {
@@ -1195,7 +1194,7 @@ async fn update_all_feeds(_app: tauri::AppHandle, app_state: State<'_, AppState>
 // 自动更新任务函数
 async fn auto_update_feeds_task(app: tauri::AppHandle) {
     use tokio::time::{sleep, Duration};
-    use chrono::{Utc};
+
     
     println!("启动自动更新任务");
     
@@ -1346,7 +1345,7 @@ async fn process_articles_sync(
     feed: Feed,
     articles: Vec<Article>
 ) {
-    use chrono::{Utc};
+    
     
     println!("开始处理来自 {} 的 {} 篇文章", feed.name, articles.len());
     
@@ -1662,7 +1661,7 @@ fn read_config_file() -> Config {
 }
 
 /// 生成默认配置文件
-fn generate_default_config(config: &Config) {
+fn generate_default_config(_config: &Config) {
     let config_path = get_config_path();
     
     // 使用默认配置生成配置文件
