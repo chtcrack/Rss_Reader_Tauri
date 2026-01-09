@@ -478,6 +478,13 @@ body {
   margin: 0;
 }
 
+.article-count {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  margin-right: auto;
+  margin-left: 1rem;
+}
+
 .article-filter {
   display: flex;
   gap: 0.5rem;

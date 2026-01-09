@@ -435,6 +435,72 @@ impl DbManager {
             }
         }
     }
+    
+    /// 获取所有源的未读计数，返回HashMap<feed_id, unread_count>
+    pub fn get_all_unread_counts(&self) -> Result<std::collections::HashMap<i64, u32>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT feed_id, COUNT(*) as unread_count FROM articles WHERE is_read = FALSE GROUP BY feed_id"
+        )?;
+        
+        let rows = stmt.query_map([], |row| {
+            let feed_id: i64 = row.get(0)?;
+            let unread_count: u32 = row.get(1)?;
+            Ok((feed_id, unread_count))
+        })?;
+        
+        let mut result = std::collections::HashMap::new();
+        for row in rows {
+            let (feed_id, unread_count) = row?;
+            result.insert(feed_id, unread_count);
+        }
+        
+        Ok(result)
+    }
+    
+    /// 获取文章总数
+    pub fn get_article_count(&self, feed_id: Option<i64>) -> Result<u32> {
+        match feed_id {
+            Some(id) => {
+                let count: u32 = self.conn.query_row(
+                    "SELECT COUNT(*) FROM articles WHERE feed_id = ?",
+                    params![id],
+                    |row| row.get(0),
+                )?;
+                Ok(count)
+            }
+            None => {
+                let count: u32 = self.conn.query_row(
+                    "SELECT COUNT(*) FROM articles",
+                    [],
+                    |row| row.get(0),
+                )?;
+                Ok(count)
+            }
+        }
+    }
+    
+    /// 获取过滤条件下的文章总数
+    pub fn get_filtered_article_count(&self, filter: &str, feed_id: Option<i64>) -> Result<u32> {
+        let sql = match (feed_id, filter) {
+            (Some(id), "unread") => "SELECT COUNT(*) FROM articles WHERE feed_id = ? AND is_read = FALSE",
+            (Some(id), "favorite") => "SELECT COUNT(*) FROM articles WHERE feed_id = ? AND is_favorite = TRUE",
+            (Some(id), _) => "SELECT COUNT(*) FROM articles WHERE feed_id = ?",
+            (None, "unread") => "SELECT COUNT(*) FROM articles WHERE is_read = FALSE",
+            (None, "favorite") => "SELECT COUNT(*) FROM articles WHERE is_favorite = TRUE",
+            (None, _) => "SELECT COUNT(*) FROM articles",
+        };
+        
+        match feed_id {
+            Some(id) => {
+                let count: u32 = self.conn.query_row(sql, params![id], |row| row.get(0))?;
+                Ok(count)
+            }
+            None => {
+                let count: u32 = self.conn.query_row(sql, [], |row| row.get(0))?;
+                Ok(count)
+            }
+        }
+    }
 
     /// 标记文章为已读
     pub fn mark_article_as_read(&self, article_id: i64, is_read: bool) -> Result<()> {
@@ -829,6 +895,66 @@ impl DbManager {
     pub fn get_unread_articles(&self, limit: u32, offset: u32) -> Result<Vec<Article>> {
         let mut stmt = self.conn.prepare("SELECT id, feed_id, title, content, pub_date, link, is_read, is_favorite, thumbnail, author, categories, translated_title, translated_content FROM articles WHERE is_read = FALSE ORDER BY pub_date DESC LIMIT ? OFFSET ?")?;
         let articles = stmt.query_map(params![limit, offset], |row| {
+            let pub_date = Utc.timestamp_opt(row.get::<_, i64>(4)?, 0).single().unwrap_or(Utc::now());
+            let categories_str: Option<String> = row.get(10)?;
+            let categories: Vec<String> = categories_str
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_else(Vec::new);
+            Ok(Article {
+                id: row.get::<_, i64>(0)?,
+                feed_id: row.get::<_, i64>(1)?,
+                title: row.get(2)?,
+                content: row.get(3)?,
+                pub_date,
+                link: row.get(5)?,
+                is_read: row.get(6)?,
+                is_favorite: row.get(7)?,
+                thumbnail: row.get(8)?,
+                author: row.get(9)?,
+                categories,
+                translated_title: row.get(11)?,
+                translated_content: row.get(12)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+        Ok(articles)
+    }
+
+    /// 根据feed_id获取未读文章
+    pub fn get_unread_articles_by_feed(&self, feed_id: i64, limit: u32, offset: u32) -> Result<Vec<Article>> {
+        let mut stmt = self.conn.prepare("SELECT id, feed_id, title, content, pub_date, link, is_read, is_favorite, thumbnail, author, categories, translated_title, translated_content FROM articles WHERE feed_id = ? AND is_read = FALSE ORDER BY pub_date DESC LIMIT ? OFFSET ?")?;
+        let articles = stmt.query_map(params![feed_id, limit, offset], |row| {
+            let pub_date = Utc.timestamp_opt(row.get::<_, i64>(4)?, 0).single().unwrap_or(Utc::now());
+            let categories_str: Option<String> = row.get(10)?;
+            let categories: Vec<String> = categories_str
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_else(Vec::new);
+            Ok(Article {
+                id: row.get::<_, i64>(0)?,
+                feed_id: row.get::<_, i64>(1)?,
+                title: row.get(2)?,
+                content: row.get(3)?,
+                pub_date,
+                link: row.get(5)?,
+                is_read: row.get(6)?,
+                is_favorite: row.get(7)?,
+                thumbnail: row.get(8)?,
+                author: row.get(9)?,
+                categories,
+                translated_title: row.get(11)?,
+                translated_content: row.get(12)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+        Ok(articles)
+    }
+
+    /// 根据feed_id获取收藏文章
+    pub fn get_favorite_articles_by_feed(&self, feed_id: i64, limit: u32, offset: u32) -> Result<Vec<Article>> {
+        let mut stmt = self.conn.prepare("SELECT id, feed_id, title, content, pub_date, link, is_read, is_favorite, thumbnail, author, categories, translated_title, translated_content FROM articles WHERE feed_id = ? AND is_favorite = TRUE ORDER BY pub_date DESC LIMIT ? OFFSET ?")?;
+        let articles = stmt.query_map(params![feed_id, limit, offset], |row| {
             let pub_date = Utc.timestamp_opt(row.get::<_, i64>(4)?, 0).single().unwrap_or(Utc::now());
             let categories_str: Option<String> = row.get(10)?;
             let categories: Vec<String> = categories_str

@@ -1312,10 +1312,11 @@ async function updateUnreadCounts() {
       console.warn('未找到id为all-unread的元素');
     }
     
-    // 获取所有分组和RSS源
-    const [feeds, groups] = await Promise.all([
+    // 获取所有分组、RSS源和所有源的未读计数
+    const [feeds, groups, allUnreadCounts] = await Promise.all([
       invoke('get_all_feeds'),
-      invoke('get_all_groups')
+      invoke('get_all_groups'),
+      invoke('get_all_unread_counts') // 一次性获取所有源的未读计数
     ]);
     
     // 将RSS源按分组ID分组
@@ -1335,10 +1336,9 @@ async function updateUnreadCounts() {
         let groupUnreadCount = 0;
         const groupFeeds = feedsByGroup[group.id] || [];
         
-        // 计算该分组下所有源的未读计数之和
+        // 从allUnreadCounts中获取该分组下所有源的未读计数之和
         for (const feed of groupFeeds) {
-          const unreadCount = await invoke('get_unread_count', { feedId: feed.id });
-          groupUnreadCount += unreadCount;
+          groupUnreadCount += allUnreadCounts[feed.id] || 0;
         }
         
         console.log(`分组 ${group.name} (${group.id}) 的未读计数:`, groupUnreadCount);
@@ -1363,10 +1363,9 @@ async function updateUnreadCounts() {
       let ungroupedUnreadCount = 0;
       const ungroupedFeeds = feedsByGroup['ungrouped'] || [];
       
-      // 计算未分组下所有源的未读计数之和
+      // 从allUnreadCounts中获取未分组下所有源的未读计数之和
       for (const feed of ungroupedFeeds) {
-        const unreadCount = await invoke('get_unread_count', { feedId: feed.id });
-        ungroupedUnreadCount += unreadCount;
+        ungroupedUnreadCount += allUnreadCounts[feed.id] || 0;
       }
       
       console.log('未分组的未读计数:', ungroupedUnreadCount);
@@ -1386,7 +1385,8 @@ async function updateUnreadCounts() {
     console.log('开始更新', feeds.length, '个源的未读计数');
     for (const feed of feeds) {
       try {
-        const unreadCount = await invoke('get_unread_count', { feedId: feed.id });
+        // 直接从allUnreadCounts中获取，避免重复API调用
+        const unreadCount = allUnreadCounts[feed.id] || 0;
         console.log(`源 ${feed.name} (${feed.id}) 的未读计数:`, unreadCount);
         const feedItem = document.querySelector(`.feed-item[data-feed-id="${feed.id}"] .unread-count`);
         if (feedItem) {
@@ -1683,47 +1683,34 @@ async function loadFilteredArticles(page = 1, size = pageSize, append = false) {
     let articles;
     const offset = (page - 1) * size;
     
+    // 获取过滤条件下的文章总数
+    totalArticles = await invoke('get_filtered_article_count', { 
+      filter: currentFilter, 
+      feedId: currentFeedId 
+    });
+    totalPages = Math.ceil(totalArticles / size);
+    
     // 根据过滤条件获取文章
     switch (currentFilter) {
       case 'unread':
         if (currentFeedId) {
-          // 获取特定源的所有文章，然后过滤未读
-          // 注意：这里我们先获取所有文章，然后过滤，因为我们需要知道总文章数
-          // 后续可以优化为直接从数据库获取总未读数
-          const allArticles = await invoke('get_articles_by_feed', { feedId: currentFeedId, limit: 1000, offset: 0 });
-          const filteredArticles = allArticles.filter(article => !article.is_read);
-          totalArticles = filteredArticles.length;
-          totalPages = Math.ceil(totalArticles / size);
-          // 截取当前页的文章
-          articles = filteredArticles.slice(offset, offset + size);
+          // 直接获取特定源的未读文章，使用分页
+          articles = await invoke('get_unread_articles_by_feed', { feedId: currentFeedId, limit: size, offset: offset });
           console.log(`成功加载源 ${currentFeedId} 的未读文章:`, articles.length, '篇');
         } else {
           // 直接获取未读文章
           articles = await invoke('get_unread_articles', { limit: size, offset: offset });
-          // 这里我们需要知道总未读数，暂时先使用一个较大的limit获取所有未读文章数
-          const allUnreadArticles = await invoke('get_unread_articles', { limit: 1000, offset: 0 });
-          totalArticles = allUnreadArticles.length;
-          totalPages = Math.ceil(totalArticles / size);
           console.log('成功加载所有未读文章:', articles.length, '篇');
         }
         break;
       case 'favorite':
         if (currentFeedId) {
-          // 获取特定源的所有文章，然后过滤收藏
-          const allArticles = await invoke('get_articles_by_feed', { feedId: currentFeedId, limit: 1000, offset: 0 });
-          const filteredArticles = allArticles.filter(article => article.is_favorite);
-          totalArticles = filteredArticles.length;
-          totalPages = Math.ceil(totalArticles / size);
-          // 截取当前页的文章
-          articles = filteredArticles.slice(offset, offset + size);
+          // 直接获取特定源的收藏文章，使用分页
+          articles = await invoke('get_favorite_articles_by_feed', { feedId: currentFeedId, limit: size, offset: offset });
           console.log(`成功加载源 ${currentFeedId} 的收藏文章:`, articles.length, '篇');
         } else {
           // 直接获取收藏文章
           articles = await invoke('get_favorite_articles', { limit: size, offset: offset });
-          // 获取总收藏数
-          const allFavoriteArticles = await invoke('get_favorite_articles', { limit: 1000, offset: 0 });
-          totalArticles = allFavoriteArticles.length;
-          totalPages = Math.ceil(totalArticles / size);
           console.log('成功加载所有收藏文章:', articles.length, '篇');
         }
         break;
@@ -1731,18 +1718,10 @@ async function loadFilteredArticles(page = 1, size = pageSize, append = false) {
         if (currentFeedId) {
           // 获取特定源的文章
           articles = await invoke('get_articles_by_feed', { feedId: currentFeedId, limit: size, offset: offset });
-          // 获取总文章数
-          const allArticles = await invoke('get_articles_by_feed', { feedId: currentFeedId, limit: 1000, offset: 0 });
-          totalArticles = allArticles.length;
-          totalPages = Math.ceil(totalArticles / size);
           console.log(`成功加载源 ${currentFeedId} 的文章:`, articles.length, '篇');
         } else {
           // 获取所有文章
           articles = await invoke('get_all_articles', { limit: size, offset: offset });
-          // 获取总文章数
-          const allArticles = await invoke('get_all_articles', { limit: 1000, offset: 0 });
-          totalArticles = allArticles.length;
-          totalPages = Math.ceil(totalArticles / size);
           console.log('成功加载所有文章:', articles.length, '篇');
         }
     }
@@ -1759,31 +1738,34 @@ async function loadFilteredArticles(page = 1, size = pageSize, append = false) {
       
       // 重新获取所有文章，然后过滤分组，以便准确计算总页数
       let allFilteredArticles;
+      let allArticles;
+      
+      // 根据过滤条件获取所有相关文章
       switch (currentFilter) {
         case 'unread':
           if (currentFeedId) {
-            const allArticles = await invoke('get_articles_by_feed', { feedId: currentFeedId, limit: 1000, offset: 0 });
+            allArticles = await invoke('get_articles_by_feed', { feedId: currentFeedId, limit: 1000, offset: 0 });
             allFilteredArticles = allArticles.filter(article => !article.is_read && groupFeedIds.includes(article.feed_id));
           } else {
-            const allUnread = await invoke('get_unread_articles', { limit: 1000, offset: 0 });
-            allFilteredArticles = allUnread.filter(article => groupFeedIds.includes(article.feed_id));
+            allArticles = await invoke('get_unread_articles', { limit: 1000, offset: 0 });
+            allFilteredArticles = allArticles.filter(article => groupFeedIds.includes(article.feed_id));
           }
           break;
         case 'favorite':
           if (currentFeedId) {
-            const allArticles = await invoke('get_articles_by_feed', { feedId: currentFeedId, limit: 1000, offset: 0 });
+            allArticles = await invoke('get_articles_by_feed', { feedId: currentFeedId, limit: 1000, offset: 0 });
             allFilteredArticles = allArticles.filter(article => article.is_favorite && groupFeedIds.includes(article.feed_id));
           } else {
-            const allFavorite = await invoke('get_favorite_articles', { limit: 1000, offset: 0 });
-            allFilteredArticles = allFavorite.filter(article => groupFeedIds.includes(article.feed_id));
+            allArticles = await invoke('get_favorite_articles', { limit: 1000, offset: 0 });
+            allFilteredArticles = allArticles.filter(article => groupFeedIds.includes(article.feed_id));
           }
           break;
         default:
           if (currentFeedId) {
-            const allArticles = await invoke('get_articles_by_feed', { feedId: currentFeedId, limit: 1000, offset: 0 });
+            allArticles = await invoke('get_articles_by_feed', { feedId: currentFeedId, limit: 1000, offset: 0 });
             allFilteredArticles = allArticles.filter(article => groupFeedIds.includes(article.feed_id));
           } else {
-            const allArticles = await invoke('get_all_articles', { limit: 1000, offset: 0 });
+            allArticles = await invoke('get_all_articles', { limit: 1000, offset: 0 });
             allFilteredArticles = allArticles.filter(article => groupFeedIds.includes(article.feed_id));
           }
       }
@@ -1795,6 +1777,12 @@ async function loadFilteredArticles(page = 1, size = pageSize, append = false) {
       // 截取当前页的文章
       articles = allFilteredArticles.slice(offset, offset + size);
       console.log(`成功过滤分组 ${currentGroupId} 的文章:`, articles.length, '篇');
+    }
+    
+    // 更新文章总数显示
+    const articleCountElement = document.getElementById('article-count');
+    if (articleCountElement) {
+      articleCountElement.textContent = `共 ${totalArticles} 篇文章`;
     }
     
     // 如果是第一页且没有文章，显示空状态
@@ -1935,10 +1923,18 @@ async function performSearch(page = 1, size = pageSize, append = false) {
     const results = await invoke('search_articles', { query, limit: size, offset: offset });
     console.log('搜索完成，找到', results.length, '篇文章');
     
-    // 这里我们需要知道总搜索结果数，暂时先使用一个较大的limit获取所有搜索结果数
+    // 搜索结果总数计算：使用搜索API获取总数
+    // 注意：当前search_articles API已经返回了所有匹配结果，所以直接使用其长度
+    // 后续可以优化为专门的搜索结果计数API
     const allResults = await invoke('search_articles', { query, limit: 1000, offset: 0 });
     totalArticles = allResults.length;
     totalPages = Math.ceil(totalArticles / size);
+    
+    // 更新文章总数显示
+    const articleCountElement = document.getElementById('article-count');
+    if (articleCountElement) {
+      articleCountElement.textContent = `共 ${totalArticles} 篇文章`;
+    }
     
     const articlesContainer = document.getElementById('articles-container');
     

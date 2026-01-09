@@ -9,6 +9,7 @@ use uuid::Uuid;
 use std::time::SystemTime;
 use std::fs::{read_dir, File};
 use std::io::{Read, Write};
+use chrono::Utc;
 
 // 导入自定义模块
 mod models;
@@ -166,13 +167,27 @@ async fn init_ai_translator(app_state: State<'_, AppState>) -> Result<(), String
 #[tauri::command(async,rename_all = "camelCase")]
 async fn update_single_feed(app: tauri::AppHandle, app_state: State<'_, AppState>, feed_id: i64) -> Result<(), String> {
     // 获取指定RSS源
-    let feed = {
+    let mut feed = {
         let db_manager = app_state.db_manager.lock().await;
         db_manager.get_feed_by_id(feed_id).map_err(|e| {
             eprintln!("Failed to get feed: {}", e);
             format!("Failed to get feed: {}", e)
         })?
     };
+    
+    // 手动刷新时，重置失败记录，立即尝试更新
+    {
+        let mut db_manager = app_state.db_manager.lock().await;
+        // 重置失败尝试次数和下次重试时间
+        if let Err(e) = db_manager.update_feed_success(feed.id, Utc::now()) {
+            eprintln!("Failed to reset feed failure status: {}", e);
+        }
+        // 更新内存中的feed对象，确保使用最新状态
+        feed = db_manager.get_feed_by_id(feed_id).map_err(|e| {
+            eprintln!("Failed to get updated feed: {}", e);
+            format!("Failed to get updated feed: {}", e)
+        })?;
+    }
     
     // 更新RSS源
     let rss_updater = RssUpdater::new();
@@ -279,6 +294,14 @@ async fn update_single_feed(app: tauri::AppHandle, app_state: State<'_, AppState
         },
         Err(e) => {
             eprintln!("Failed to update feed {}: {}", feed.name, e);
+            
+            // 更新失败状态
+            {
+                let mut db_manager = app_state.db_manager.lock().await;
+                if let Err(err) = db_manager.update_feed_failure(feed.id, &e.to_string()) {
+                    eprintln!("Failed to update feed failure status: {}", err);
+                }
+            }
             
             // 即使更新失败，也通知前端，以便清除加载状态
             if let Err(e) = app.emit("feed_updated", Some(feed.id)) {
@@ -475,6 +498,16 @@ async fn get_unread_count(app_state: State<'_, AppState>, feed_id: Option<i64>) 
     })
 }
 
+// Tauri命令：获取所有源的未读计数
+#[tauri::command(async, rename_all = "camelCase")]
+async fn get_all_unread_counts(app_state: State<'_, AppState>) -> Result<std::collections::HashMap<i64, u32>, String> {
+    let db_manager = app_state.db_manager.lock().await;
+    db_manager.get_all_unread_counts().map_err(|e| {
+        eprintln!("Failed to get all unread counts from database: {}", e);
+        format!("Failed to get all unread counts: {}", e)
+    })
+}
+
 // Tauri命令：搜索文章
 #[tauri::command(async)]
 async fn search_articles(app_state: State<'_, AppState>, query: &str, limit: u32) -> Result<Vec<(Article, String)>, String> {
@@ -605,6 +638,16 @@ async fn get_favorite_articles(app_state: State<'_, AppState>, limit: u32, offse
     })
 }
 
+// Tauri命令：根据feed_id获取收藏文章
+#[tauri::command(async)]
+async fn get_favorite_articles_by_feed(app_state: State<'_, AppState>, feedId: i64, limit: u32, offset: u32) -> Result<Vec<Article>, String> {
+    let db_manager = app_state.db_manager.lock().await;
+    db_manager.get_favorite_articles_by_feed(feedId, limit, offset).map_err(|e| {
+        eprintln!("Failed to get favorite articles by feed from database: {}", e);
+        format!("Failed to get favorite articles by feed: {}", e)
+    })
+}
+
 // Tauri命令：获取未读文章
 #[tauri::command(async)]
 async fn get_unread_articles(app_state: State<'_, AppState>, limit: u32, offset: u32) -> Result<Vec<Article>, String> {
@@ -612,6 +655,36 @@ async fn get_unread_articles(app_state: State<'_, AppState>, limit: u32, offset:
     db_manager.get_unread_articles(limit, offset).map_err(|e| {
         eprintln!("Failed to get unread articles from database: {}", e);
         format!("Failed to get unread articles: {}", e)
+    })
+}
+
+// Tauri命令：根据feed_id获取未读文章
+#[tauri::command(async)]
+async fn get_unread_articles_by_feed(app_state: State<'_, AppState>, feedId: i64, limit: u32, offset: u32) -> Result<Vec<Article>, String> {
+    let db_manager = app_state.db_manager.lock().await;
+    db_manager.get_unread_articles_by_feed(feedId, limit, offset).map_err(|e| {
+        eprintln!("Failed to get unread articles by feed from database: {}", e);
+        format!("Failed to get unread articles by feed: {}", e)
+    })
+}
+
+// Tauri命令：获取文章总数
+#[tauri::command(async)]
+async fn get_article_count(app_state: State<'_, AppState>, feed_id: Option<i64>) -> Result<u32, String> {
+    let db_manager = app_state.db_manager.lock().await;
+    db_manager.get_article_count(feed_id).map_err(|e| {
+        eprintln!("Failed to get article count from database: {}", e);
+        format!("Failed to get article count: {}", e)
+    })
+}
+
+// Tauri命令：获取过滤条件下的文章总数
+#[tauri::command(async)]
+async fn get_filtered_article_count(app_state: State<'_, AppState>, filter: &str, feed_id: Option<i64>) -> Result<u32, String> {
+    let db_manager = app_state.db_manager.lock().await;
+    db_manager.get_filtered_article_count(filter, feed_id).map_err(|e| {
+        eprintln!("Failed to get filtered article count from database: {}", e);
+        format!("Failed to get filtered article count: {}", e)
     })
 }
 
@@ -1018,50 +1091,90 @@ async fn ai_chat(
 #[tauri::command(async)]
 async fn update_all_feeds(_app: tauri::AppHandle, app_state: State<'_, AppState>) -> Result<(), String> {
     // 获取RSS源列表
-        let feeds = {
-            let db_manager = app_state.db_manager.lock().await;
-            db_manager.get_all_feeds().map_err(|e| {
-                eprintln!("Failed to get feeds from database: {}", e);
-                format!("Failed to update feeds: {}", e)
-            })?
-        };
+    let all_feeds = {
+        let db_manager = app_state.db_manager.lock().await;
+        db_manager.get_all_feeds().map_err(|e| {
+            eprintln!("Failed to get feeds from database: {}", e);
+            format!("Failed to update feeds: {}", e)
+        })?
+    };
 
-    // 克隆RSS更新器并更新所有源
+    // 保存总源数量，避免后续使用被移动的all_feeds
+    let total_feeds_count = all_feeds.len();
+    
+    // 筛选需要更新的RSS源：
+    // 1. 没有失败记录的源
+    // 2. 有失败记录但下次重试时间已到的源
+    let now = Utc::now();
+    let feeds_to_update: Vec<Feed> = all_feeds.into_iter()
+        .filter(|feed| {
+            match &feed.next_retry_time {
+                None => true, // 没有失败记录，正常更新
+                Some(retry_time) => *retry_time <= now, // 下次重试时间已到
+            }
+        })
+        .collect();
+
+    // 如果没有需要更新的源，直接返回
+    if feeds_to_update.is_empty() {
+        println!("没有需要更新的RSS源");
+        return Ok(());
+    }
+
+    // 克隆RSS更新器并更新所有需要更新的源
     let rss_updater = {
         let rss_updater = app_state.rss_updater.lock().await;
         rss_updater.clone()
     };
-    let results = rss_updater.update_feeds(&feeds).await;
+    let results = rss_updater.update_feeds(&feeds_to_update).await;
 
     // 保存新文章到数据库，每个RSS源独立处理，每次操作后释放锁
-    for result in results {
+    for (index, result) in results.iter().enumerate() {
+        let feed = &feeds_to_update[index];
         match result {
-            Ok((feed, articles)) => {
+            Ok((_, articles)) => {
                 println!("开始保存来自 {} 的文章，共 {} 篇", feed.name, articles.len());
                 
                 // 保存当前RSS源的所有文章
                 for article in articles {
                     // 为每篇文章独立获取和释放锁，减少锁持有时间
-                let mut db_manager = app_state.db_manager.lock().await;
-                // 尝试添加文章，如果成功则说明是新文章
-                match db_manager.add_article(&article) {
-                    Ok(true) => {
-                        // 发送新文章通知
-                        send_new_article_notification(&_app, &feed.name, &article.title, article.translated_title.as_deref(), feed.notification_enabled);
+                    let mut db_manager = app_state.db_manager.lock().await;
+                    // 尝试添加文章，如果成功则说明是新文章
+                    match db_manager.add_article(&article) {
+                        Ok(true) => {
+                            // 发送新文章通知
+                            send_new_article_notification(&_app, &feed.name, &article.title, article.translated_title.as_deref(), feed.notification_enabled);
+                        }
+                        Ok(false) => {
+                            // 文章已存在，忽略
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to add article: {}", e);
+                        }
                     }
-                    Ok(false) => {
-                        // 文章已存在，忽略
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to add article: {}", e);
-                    }
-                }
                 }
                 
                 println!("完成保存来自 {} 的文章", feed.name);
+                
+                // 更新feed的成功状态
+                let last_updated = Utc::now();
+                if let Err(e) = {
+                    let mut db_manager = app_state.db_manager.lock().await;
+                    db_manager.update_feed_success(feed.id, last_updated)
+                } {
+                    eprintln!("Failed to update feed success status: {}", e);
+                }
             }
             Err(e) => {
-                eprintln!("Failed to update feed: {}", e);
+                eprintln!("Failed to update feed {}: {}", feed.name, e);
+                
+                // 更新feed的失败状态
+                if let Err(err) = {
+                    let mut db_manager = app_state.db_manager.lock().await;
+                    db_manager.update_feed_failure(feed.id, &e.to_string())
+                } {
+                    eprintln!("Failed to update feed failure status: {}", err);
+                }
             }
         }
     }
@@ -1710,6 +1823,9 @@ pub fn run() {
             add_feed,
             get_all_feeds,
             get_unread_count,
+            get_all_unread_counts,
+            get_article_count,
+            get_filtered_article_count,
             search_articles,
             mark_article_as_read,
             update_all_feeds,
@@ -1725,7 +1841,9 @@ pub fn run() {
             get_all_articles,
             toggle_favorite,
             get_favorite_articles,
+            get_favorite_articles_by_feed,
             get_unread_articles,
+            get_unread_articles_by_feed,
             export_opml,
             import_opml,
             add_ai_platform,
