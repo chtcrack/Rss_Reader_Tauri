@@ -342,74 +342,41 @@ impl DbManager {
 
         // 首先尝试获取现有文章的ID
         let existing_id = self.conn.query_row(
-            r#"SELECT id, translated_title, translated_content FROM articles WHERE feed_id = ? AND link = ?"#,
+            r#"SELECT id FROM articles WHERE feed_id = ? AND link = ?"#,
             params![article.feed_id, article.link.as_str()],
             |row| {
-                let id: i64 = row.get(0)?;
-                let existing_translated_title: Option<String> = row.get(1)?;
-                let existing_translated_content: Option<String> = row.get(2)?;
-                Ok((id, existing_translated_title, existing_translated_content))
+                let id: i64 = row.get(0)?; // 只需要检查ID是否存在，不需要获取其他字段
+                Ok(id)
             }
         ).ok();
 
-        let is_new_article = existing_id.is_none();
+        if existing_id.is_some() {
+            // 文章已存在，直接跳过，不进行任何更新
+            return Ok(false);
+        }
         
-        let _rows_affected = match existing_id {
-            Some((id, existing_translated_title, existing_translated_content)) => {
-                // 文章已存在，更新文章信息，但保留原有翻译内容
-                // 只在明确提供了新的翻译内容时才更新翻译字段
-                let translated_title_to_use = article.translated_title.as_ref().or(existing_translated_title.as_ref());
-                let translated_content_to_use = article.translated_content.as_ref().or(existing_translated_content.as_ref());
-                
-                self.conn.execute(
-                    r#"UPDATE articles SET 
-                        title = ?, 
-                        content = ?, 
-                        pub_date = ?, 
-                        thumbnail = ?, 
-                        author = ?, 
-                        categories = ?, 
-                        translated_title = ?, 
-                        translated_content = ?
-                   WHERE id = ?"#,
-                    params![
-                        article.title.as_str(),
-                        article.content.as_str(),
-                        pub_date_ts,
-                        article.thumbnail.as_deref(),
-                        article.author.as_deref(),
-                        categories_str.as_str(),
-                        translated_title_to_use,
-                        translated_content_to_use,
-                        id
-                    ],
-                )?
-            },
-            None => {
-                // 文章不存在，插入新文章
-                self.conn.execute(
-                    r#"INSERT INTO articles (feed_id, title, content, pub_date, link, is_read, is_favorite, thumbnail, author, categories, translated_title, translated_content) 
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
-                    params![
-                        article.feed_id,
-                        article.title.as_str(),
-                        article.content.as_str(),
-                        pub_date_ts,
-                        article.link.as_str(),
-                        article.is_read,
-                        article.is_favorite,
-                        article.thumbnail.as_deref(),
-                        article.author.as_deref(),
-                        categories_str.as_str(),
-                        article.translated_title.as_deref(),
-                        article.translated_content.as_deref()
-                    ],
-                )?
-            }
-        };
+        // 文章不存在，插入新文章
+        let _rows_affected = self.conn.execute(
+            r#"INSERT INTO articles (feed_id, title, content, pub_date, link, is_read, is_favorite, thumbnail, author, categories, translated_title, translated_content) 
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+            params![
+                article.feed_id,
+                article.title.as_str(),
+                article.content.as_str(),
+                pub_date_ts,
+                article.link.as_str(),
+                article.is_read,
+                article.is_favorite,
+                article.thumbnail.as_deref(),
+                article.author.as_deref(),
+                categories_str.as_str(),
+                article.translated_title.as_deref(),
+                article.translated_content.as_deref()
+            ],
+        )?;
         
-        // 返回是否成功添加了新文章（如果是更新，返回false；如果是插入，返回true）
-        Ok(is_new_article)
+        // 返回是否成功添加了新文章
+        Ok(true)
     }
 
     /// 获取未读文章数量
@@ -529,7 +496,7 @@ impl DbManager {
         result
     }
 
-    pub fn search_articles(&self, query: &str, limit: u32) -> Result<Vec<(Article, String)>> {
+    pub fn search_articles(&self, query: &str, limit: u32, feed_id: Option<i64>) -> Result<Vec<(Article, String)>> {
         // 使用FTS5进行全文搜索，支持前缀匹配
         // 处理搜索词，先转义特殊字符，再添加通配符支持前缀匹配
         let processed_query = query
@@ -541,19 +508,23 @@ impl DbManager {
             .collect::<Vec<_>>()
             .join(" ");
 
+        // 使用一个统一的SQL查询，通过参数化的方式处理feed_id的条件
+        // 当feed_id为None时，条件(a.feed_id = ? OR ? IS NULL)会匹配所有文章
+        // 当feed_id为Some(id)时，条件会匹配特定feed_id的文章
         let mut stmt = self.conn.prepare(
             r#"
             SELECT a.id, a.feed_id, a.title, a.content, a.pub_date, a.link, a.is_read, a.is_favorite, a.thumbnail, a.author, a.categories, a.translated_title, a.translated_content, f.name as feed_name 
             FROM articles a
             JOIN feeds f ON a.feed_id = f.id
             JOIN articles_fts ft ON a.id = ft.rowid
-            WHERE ft.articles_fts MATCH ?
+            WHERE ft.articles_fts MATCH ? AND (a.feed_id = ? OR ? IS NULL)
             ORDER BY a.pub_date DESC
             LIMIT ?
             "#,
         )?;
 
-        let results = stmt.query_map(params![processed_query, limit], |row| {
+        // 执行查询，传递feed_id作为参数，当feed_id为None时，会传递NULL
+        let results = stmt.query_map(params![processed_query, feed_id, feed_id, limit], |row| {
             let pub_date = Utc.timestamp_opt(row.get::<_, i64>(4)?, 0).single().unwrap_or(Utc::now());
             
             let categories_str: Option<String> = row.get(10)?;
@@ -580,8 +551,9 @@ impl DbManager {
 
             let feed_name: String = row.get(13)?;
             Ok((article, feed_name))
-        })?
-        .collect::<Result<Vec<_>>>()?;
+        })?;
+
+        let results = results.collect::<Result<Vec<_>>>()?;
 
         Ok(results)
     }

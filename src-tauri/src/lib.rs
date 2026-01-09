@@ -509,10 +509,10 @@ async fn get_all_unread_counts(app_state: State<'_, AppState>) -> Result<std::co
 }
 
 // Tauri命令：搜索文章
-#[tauri::command(async)]
-async fn search_articles(app_state: State<'_, AppState>, query: &str, limit: u32) -> Result<Vec<(Article, String)>, String> {
+#[tauri::command(async, rename_all = "camelCase")]
+async fn search_articles(app_state: State<'_, AppState>, query: &str, limit: u32, feed_id: Option<i64>) -> Result<Vec<(Article, String)>, String> {
     let db_manager = app_state.db_manager.lock().await;
-    db_manager.search_articles(query, limit).map_err(|e| {
+    db_manager.search_articles(query, limit, feed_id).map_err(|e| {
         eprintln!("Failed to search articles in database: {}", e);
         format!("Failed to search articles: {}", e)
     })

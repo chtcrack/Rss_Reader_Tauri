@@ -1976,13 +1976,13 @@ async function performSearch(page = 1, size = pageSize, append = false) {
     
     console.log('开始搜索文章:', query, { page, size, append });
     const offset = (page - 1) * size;
-    const results = await invoke('search_articles', { query, limit: size, offset: offset });
+    const results = await invoke('search_articles', { query, limit: size, offset: offset, feedId: currentFeedId });
     console.log('搜索完成，找到', results.length, '篇文章');
     
     // 搜索结果总数计算：使用搜索API获取总数
     // 注意：当前search_articles API已经返回了所有匹配结果，所以直接使用其长度
     // 后续可以优化为专门的搜索结果计数API
-    const allResults = await invoke('search_articles', { query, limit: 1000, offset: 0 });
+    const allResults = await invoke('search_articles', { query, limit: 1000, offset: 0, feedId: currentFeedId });
     totalArticles = allResults.length;
     totalPages = Math.ceil(totalArticles / size);
     

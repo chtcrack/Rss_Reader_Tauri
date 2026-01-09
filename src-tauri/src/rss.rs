@@ -180,6 +180,26 @@ impl RssParser {
             chrono::DateTime::parse_from_rfc2822(d)
                 .ok()
                 .map(|dt| dt.into())
+        }).or_else(|| {
+            // 尝试从dc:date字段获取日期
+            item.extensions()
+                .iter()
+                // extensions()返回的是(&namespace, &elements_map)元组
+                // dc命名空间的完整URL是http://purl.org/dc/elements/1.1/
+                .find(|(ns, _)| *ns == "http://purl.org/dc/elements/1.1/")
+                .and_then(|(_, elements_map)| {
+                    elements_map.get("date")
+                        .and_then(|extensions| extensions.first())
+                })
+                .and_then(|date_ext| {
+                    // 使用value()方法获取Extension的内容
+                    date_ext.value()
+                })
+                .and_then(|date_str| {
+                    chrono::DateTime::parse_from_rfc3339(date_str)
+                        .ok()
+                        .map(|dt| dt.into())
+                })
         }).unwrap_or_else(Utc::now);
 
         let categories = item.categories().iter()
