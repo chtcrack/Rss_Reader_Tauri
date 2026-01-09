@@ -42,6 +42,9 @@ let confirmDeleteArticlesBtn;
 let currentDeletingArticleId = null; // 当前要删除的文章ID
 let deleteType = 'all'; // 'all' 或 'single'
 
+// 标记全部已读相关变量
+let markAllReadBtn;
+
 // AI平台相关状态
 let aiPlatformsModal;
 let aiPlatformsList;
@@ -832,30 +835,33 @@ function initEventListeners() {
     });
   }
   
-  // 删除文章模态框关闭事件
-  const deleteArticlesClose = deleteArticlesModal.querySelector('.close');
-  if (deleteArticlesClose) {
-    deleteArticlesClose.addEventListener('click', () => {
-      deleteArticlesModal.classList.remove('show');
-    });
-  }
+  // 标记全部已读按钮事件
+  markAllReadBtn = document.getElementById('mark-all-read-btn');
   
-  // 删除文章取消按钮事件
-  const deleteArticlesCancel = deleteArticlesModal.querySelector('.cancel');
-  if (deleteArticlesCancel) {
-    deleteArticlesCancel.addEventListener('click', () => {
-      deleteArticlesModal.classList.remove('show');
-    });
-  }
-  
-  // 点击模态框外部关闭
-  if (deleteArticlesModal) {
-    deleteArticlesModal.addEventListener('click', (e) => {
-      if (e.target === deleteArticlesModal) {
-        deleteArticlesModal.classList.remove('show');
+  // 标记全部已读按钮点击事件
+  if (markAllReadBtn) {
+    markAllReadBtn.addEventListener('click', () => {
+      // 根据currentFeedId设置确认消息
+      const deleteMessage = document.getElementById('delete-articles-message');
+      if (currentFeedId) {
+        deleteMessage.textContent = '确定要将当前订阅源的所有文章标记为已读吗？';
+      } else {
+        deleteMessage.textContent = '确定要将所有订阅源的文章标记为已读吗？';
       }
+      // 复用删除文章的模态框，修改标题
+      deleteArticlesModal.querySelector('h2').textContent = '标记为已读';
+      // 修改确认按钮文本和样式
+      const confirmBtn = document.getElementById('confirm-delete-articles');
+      confirmBtn.textContent = '标记为已读';
+      confirmBtn.classList.remove('danger');
+      confirmBtn.classList.add('success');
+      // 保存当前操作类型
+      deleteType = 'mark-read-all';
+      deleteArticlesModal.classList.add('show');
     });
   }
+  
+
   
   // 确认删除文章事件
   if (confirmDeleteArticlesBtn) {
@@ -868,6 +874,9 @@ function initEventListeners() {
           document.getElementById('article-title').textContent = '';
           document.getElementById('article-body').innerHTML = '<div class="empty-state"><p>请选择一篇文章阅读</p></div>';
           document.getElementById('article-meta').innerHTML = '';
+        } else if (deleteType === 'mark-read-all') {
+          // 标记全部已读
+          await invoke('mark_all_articles_as_read', { feedId: currentFeedId });
         } else {
           // 删除所有文章
           await invoke('delete_articles', { feedId: currentFeedId });
@@ -877,8 +886,49 @@ function initEventListeners() {
         await loadFilteredArticles(); // 重新加载文章列表
         await updateUnreadCounts(); // 更新未读计数
       } catch (error) {
-        console.error('Failed to delete articles:', error);
-        alert('删除文章失败: ' + error);
+        console.error('操作失败:', error);
+        alert('操作失败: ' + error);
+      }
+    });
+  }
+  
+  // 模态框关闭时恢复原始样式
+  function resetDeleteModal() {
+    // 恢复模态框标题
+    deleteArticlesModal.querySelector('h2').textContent = '删除文章';
+    // 恢复确认按钮样式
+    const confirmBtn = document.getElementById('confirm-delete-articles');
+    confirmBtn.textContent = '删除';
+    confirmBtn.classList.remove('success');
+    confirmBtn.classList.add('danger');
+    // 恢复默认删除类型
+    deleteType = 'all';
+  }
+  
+  // 删除文章模态框关闭事件
+  const deleteArticlesClose = deleteArticlesModal.querySelector('.close');
+  if (deleteArticlesClose) {
+    deleteArticlesClose.addEventListener('click', () => {
+      deleteArticlesModal.classList.remove('show');
+      resetDeleteModal();
+    });
+  }
+  
+  // 删除文章取消按钮事件
+  const deleteArticlesCancel = deleteArticlesModal.querySelector('.cancel');
+  if (deleteArticlesCancel) {
+    deleteArticlesCancel.addEventListener('click', () => {
+      deleteArticlesModal.classList.remove('show');
+      resetDeleteModal();
+    });
+  }
+  
+  // 点击模态框外部关闭
+  if (deleteArticlesModal) {
+    deleteArticlesModal.addEventListener('click', (e) => {
+      if (e.target === deleteArticlesModal) {
+        deleteArticlesModal.classList.remove('show');
+        resetDeleteModal();
       }
     });
   }

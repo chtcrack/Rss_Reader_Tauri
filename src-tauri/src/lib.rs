@@ -778,6 +778,16 @@ async fn delete_article(app_state: State<'_, AppState>, article_id: i64) -> Resu
     })
 }
 
+// Tauri命令：标记所有文章为已读
+#[tauri::command(async, rename_all = "camelCase")]
+async fn mark_all_articles_as_read(app_state: State<'_, AppState>, feed_id: Option<i64>) -> Result<(), String> {
+    let mut db_manager = app_state.db_manager.lock().await;
+    db_manager.mark_all_articles_as_read(feed_id).map_err(|e| {
+        eprintln!("Failed to mark all articles as read from database: {}", e);
+        format!("Failed to mark all articles as read: {}", e)
+    })
+}
+
 // Tauri命令：打开链接
 #[tauri::command]
 fn open_link(app_handle: tauri::AppHandle, url: String) -> Result<(), String> {
@@ -1844,6 +1854,7 @@ pub fn run() {
             get_favorite_articles_by_feed,
             get_unread_articles,
             get_unread_articles_by_feed,
+            mark_all_articles_as_read,
             export_opml,
             import_opml,
             add_ai_platform,

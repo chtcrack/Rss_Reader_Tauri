@@ -201,7 +201,6 @@ impl DbManager {
             CREATE VIRTUAL TABLE IF NOT EXISTS articles_fts USING fts5(
                 title,
                 content,
-                summary,
                 article_id UNINDEXED,
                 feed_id UNINDEXED,
                 pub_date UNINDEXED
@@ -229,8 +228,8 @@ impl DbManager {
         conn.execute(
             r#"
             CREATE TRIGGER IF NOT EXISTS articles_ai AFTER INSERT ON articles BEGIN
-                INSERT INTO articles_fts(rowid, title, content, summary, article_id, feed_id, pub_date)
-                VALUES (new.id, new.title, new.content, new.summary, new.id, new.feed_id, new.pub_date);
+                INSERT INTO articles_fts(rowid, title, content, article_id, feed_id, pub_date)
+                VALUES (new.id, new.title, new.content, new.id, new.feed_id, new.pub_date);
             END;
             "#,
             [],
@@ -250,8 +249,7 @@ impl DbManager {
             CREATE TRIGGER IF NOT EXISTS articles_au AFTER UPDATE ON articles BEGIN
                 UPDATE articles_fts SET
                     title = new.title,
-                    content = new.content,
-                    summary = new.summary
+                    content = new.content
                 WHERE rowid = new.id;
             END;
             "#,
@@ -515,8 +513,34 @@ impl DbManager {
     }
 
     /// 搜索文章
+    /// 转义FTS5搜索语法中的特殊字符
+    fn escape_fts5_special_chars(input: &str) -> String {
+        let mut result = String::with_capacity(input.len() * 2);
+        for c in input.chars() {
+            match c {
+                // FTS5特殊字符列表
+                '[' | ']' | '*' | '?' | '!' | '~' | '"' | '|' | '(' | ')' | '+' | '-' | ':' | '{' | '}' | '^' | '\'' => {
+                    result.push('\\');
+                    result.push(c);
+                }
+                _ => result.push(c),
+            }
+        }
+        result
+    }
+
     pub fn search_articles(&self, query: &str, limit: u32) -> Result<Vec<(Article, String)>> {
-        // 使用FTS5进行全文搜索
+        // 使用FTS5进行全文搜索，支持前缀匹配
+        // 处理搜索词，先转义特殊字符，再添加通配符支持前缀匹配
+        let processed_query = query
+            .split_whitespace()
+            .map(|word| {
+                let escaped_word = Self::escape_fts5_special_chars(word);
+                format!("{}*", escaped_word)
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+
         let mut stmt = self.conn.prepare(
             r#"
             SELECT a.id, a.feed_id, a.title, a.content, a.pub_date, a.link, a.is_read, a.is_favorite, a.thumbnail, a.author, a.categories, a.translated_title, a.translated_content, f.name as feed_name 
@@ -529,7 +553,7 @@ impl DbManager {
             "#,
         )?;
 
-        let results = stmt.query_map(params![query, limit], |row| {
+        let results = stmt.query_map(params![processed_query, limit], |row| {
             let pub_date = Utc.timestamp_opt(row.get::<_, i64>(4)?, 0).single().unwrap_or(Utc::now());
             
             let categories_str: Option<String> = row.get(10)?;
@@ -1021,6 +1045,36 @@ impl DbManager {
             "DELETE FROM articles WHERE id = ?",
             params![article_id],
         )?;
+        
+        // 提交事务
+        tx.commit()?;
+        
+        Ok(())
+    }
+    
+    /// 标记所有文章为已读
+    /// 如果提供feed_id，则标记该源的所有文章为已读
+    /// 如果不提供feed_id，则标记所有文章为已读
+    pub fn mark_all_articles_as_read(&mut self, feed_id: Option<i64>) -> Result<()> {
+        // 开始事务
+        let tx = self.conn.transaction()?;
+        
+        match feed_id {
+            Some(id) => {
+                // 标记特定源的所有文章为已读
+                tx.execute(
+                    "UPDATE articles SET is_read = TRUE WHERE feed_id = ?",
+                    params![id],
+                )?;
+            },
+            None => {
+                // 标记所有文章为已读
+                tx.execute(
+                    "UPDATE articles SET is_read = TRUE",
+                    [],
+                )?;
+            }
+        }
         
         // 提交事务
         tx.commit()?;
