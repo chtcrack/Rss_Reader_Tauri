@@ -1734,104 +1734,82 @@ async function loadFilteredArticles(page = 1, size = pageSize, append = false) {
       articlesContainer.innerHTML = '';
       currentPage = 1;
       hasMore = true;
+    } else {
+      // 如果是追加模式，更新currentPage为当前请求的page
+      currentPage = page;
     }
     
     let articles;
     const offset = (page - 1) * size;
     
-    // 获取过滤条件下的文章总数
-    totalArticles = await invoke('get_filtered_article_count', { 
-      filter: currentFilter, 
-      feedId: currentFeedId 
-    });
-    totalPages = Math.ceil(totalArticles / size);
-    
-    // 根据过滤条件获取文章
-    switch (currentFilter) {
-      case 'unread':
-        if (currentFeedId) {
-          // 直接获取特定源的未读文章，使用分页
-          articles = await invoke('get_unread_articles_by_feed', { feedId: currentFeedId, limit: size, offset: offset });
-          console.log(`成功加载源 ${currentFeedId} 的未读文章:`, articles.length, '篇');
-        } else {
-          // 直接获取未读文章
-          articles = await invoke('get_unread_articles', { limit: size, offset: offset });
-          console.log('成功加载所有未读文章:', articles.length, '篇');
-        }
-        break;
-      case 'favorite':
-        if (currentFeedId) {
-          // 直接获取特定源的收藏文章，使用分页
-          articles = await invoke('get_favorite_articles_by_feed', { feedId: currentFeedId, limit: size, offset: offset });
-          console.log(`成功加载源 ${currentFeedId} 的收藏文章:`, articles.length, '篇');
-        } else {
-          // 直接获取收藏文章
-          articles = await invoke('get_favorite_articles', { limit: size, offset: offset });
-          console.log('成功加载所有收藏文章:', articles.length, '篇');
-        }
-        break;
-      default:
-        if (currentFeedId) {
-          // 获取特定源的文章
-          articles = await invoke('get_articles_by_feed', { feedId: currentFeedId, limit: size, offset: offset });
-          console.log(`成功加载源 ${currentFeedId} 的文章:`, articles.length, '篇');
-        } else {
-          // 获取所有文章
-          articles = await invoke('get_all_articles', { limit: size, offset: offset });
-          console.log('成功加载所有文章:', articles.length, '篇');
-        }
-    }
-    
-    // 如果有分组过滤，进一步筛选文章
+    // 获取分组下的所有RSS源（如果有分组过滤）
+    let groupFeedIds = [];
     if (currentGroupId) {
-      // 获取分组下的所有RSS源
       const groupFeeds = currentGroupId === 'ungrouped' 
         ? (await invoke('get_all_feeds')).filter(feed => !feed.group_id)
         : await invoke('get_feeds_by_group', { groupId: currentGroupId });
       
       // 获取这些源的ID
-      const groupFeedIds = groupFeeds.map(feed => feed.id);
-      
-      // 重新获取所有文章，然后过滤分组，以便准确计算总页数
-      let allFilteredArticles;
-      let allArticles;
-      
-      // 根据过滤条件获取所有相关文章
-      switch (currentFilter) {
-        case 'unread':
-          if (currentFeedId) {
-            allArticles = await invoke('get_articles_by_feed', { feedId: currentFeedId, limit: 1000, offset: 0 });
-            allFilteredArticles = allArticles.filter(article => !article.is_read && groupFeedIds.includes(article.feed_id));
-          } else {
-            allArticles = await invoke('get_unread_articles', { limit: 1000, offset: 0 });
-            allFilteredArticles = allArticles.filter(article => groupFeedIds.includes(article.feed_id));
-          }
-          break;
-        case 'favorite':
-          if (currentFeedId) {
-            allArticles = await invoke('get_articles_by_feed', { feedId: currentFeedId, limit: 1000, offset: 0 });
-            allFilteredArticles = allArticles.filter(article => article.is_favorite && groupFeedIds.includes(article.feed_id));
-          } else {
-            allArticles = await invoke('get_favorite_articles', { limit: 1000, offset: 0 });
-            allFilteredArticles = allArticles.filter(article => groupFeedIds.includes(article.feed_id));
-          }
-          break;
-        default:
-          if (currentFeedId) {
-            allArticles = await invoke('get_articles_by_feed', { feedId: currentFeedId, limit: 1000, offset: 0 });
-            allFilteredArticles = allArticles.filter(article => groupFeedIds.includes(article.feed_id));
-          } else {
-            allArticles = await invoke('get_all_articles', { limit: 1000, offset: 0 });
-            allFilteredArticles = allArticles.filter(article => groupFeedIds.includes(article.feed_id));
-          }
-      }
-      
-      // 更新总文章数和总页数
-      totalArticles = allFilteredArticles.length;
-      totalPages = Math.ceil(totalArticles / size);
-      
-      // 截取当前页的文章
-      articles = allFilteredArticles.slice(offset, offset + size);
+      groupFeedIds = groupFeeds.map(feed => feed.id);
+    }
+    
+    // 获取过滤条件下的所有相关文章用于计算总页数
+    let allFilteredArticles;
+    switch (currentFilter) {
+      case 'unread':
+        if (currentFeedId) {
+          // 获取特定源的所有未读文章
+          const allArticles = await invoke('get_articles_by_feed', { feedId: currentFeedId, limit: 1000, offset: 0 });
+          allFilteredArticles = groupFeedIds.length > 0 
+            ? allArticles.filter(article => !article.is_read && groupFeedIds.includes(article.feed_id))
+            : allArticles.filter(article => !article.is_read);
+        } else {
+          // 获取所有未读文章
+          const allArticles = await invoke('get_unread_articles', { limit: 1000, offset: 0 });
+          allFilteredArticles = groupFeedIds.length > 0 
+            ? allArticles.filter(article => groupFeedIds.includes(article.feed_id))
+            : allArticles;
+        }
+        break;
+      case 'favorite':
+        if (currentFeedId) {
+          // 获取特定源的所有文章
+          const allArticles = await invoke('get_articles_by_feed', { feedId: currentFeedId, limit: 1000, offset: 0 });
+          allFilteredArticles = groupFeedIds.length > 0 
+            ? allArticles.filter(article => article.is_favorite && groupFeedIds.includes(article.feed_id))
+            : allArticles.filter(article => article.is_favorite);
+        } else {
+          // 获取所有收藏文章
+          const allArticles = await invoke('get_favorite_articles', { limit: 1000, offset: 0 });
+          allFilteredArticles = groupFeedIds.length > 0 
+            ? allArticles.filter(article => groupFeedIds.includes(article.feed_id))
+            : allArticles;
+        }
+        break;
+      default:
+        if (currentFeedId) {
+          // 获取特定源的所有文章
+          const allArticles = await invoke('get_articles_by_feed', { feedId: currentFeedId, limit: 1000, offset: 0 });
+          allFilteredArticles = groupFeedIds.length > 0 
+            ? allArticles.filter(article => groupFeedIds.includes(article.feed_id))
+            : allArticles;
+        } else {
+          // 获取所有文章
+          const allArticles = await invoke('get_all_articles', { limit: 1000, offset: 0 });
+          allFilteredArticles = groupFeedIds.length > 0 
+            ? allArticles.filter(article => groupFeedIds.includes(article.feed_id))
+            : allArticles;
+        }
+    }
+    
+    // 更新总文章数和总页数
+    totalArticles = allFilteredArticles.length;
+    totalPages = Math.ceil(totalArticles / size);
+    
+    // 截取当前页的文章
+    articles = allFilteredArticles.slice(offset, offset + size);
+    console.log(`成功加载文章:`, articles.length, '篇');
+    if (groupFeedIds.length > 0) {
       console.log(`成功过滤分组 ${currentGroupId} 的文章:`, articles.length, '篇');
     }
     
@@ -1849,6 +1827,12 @@ async function loadFilteredArticles(page = 1, size = pageSize, append = false) {
     
     // 渲染文章列表
     articles.forEach(article => {
+      // 检查是否已存在该文章，如果存在则跳过
+      if (document.querySelector(`[data-article-id="${article.id}"]`)) {
+        console.warn('文章已存在，跳过渲染:', article.id);
+        return;
+      }
+      
       const articleItem = document.createElement('div');
       articleItem.className = `article-item ${article.is_read ? '' : 'unread'}`;
       articleItem.dataset.articleId = article.id;
@@ -1891,16 +1875,14 @@ async function loadFilteredArticles(page = 1, size = pageSize, append = false) {
     loadingElements.forEach(element => element.remove());
     
     // 检查是否还有更多数据
-    if (articles.length < size || offset + articles.length >= totalArticles) {
-      hasMore = false;
-    } else {
-      // 只有在追加模式且有更多数据时，才显示"正在加载更多"提示
-      if (append) {
-        const loadingElement = document.createElement('div');
-        loadingElement.className = 'loading-state';
-        loadingElement.innerHTML = '<div class="loading-spinner-small"></div><span class="loading-text">正在加载更多…</span>';
-        articlesContainer.appendChild(loadingElement);
-      }
+    hasMore = offset + articles.length < totalArticles;
+    
+    // 只有在追加模式且有更多数据时，才显示"正在加载更多"提示
+    if (append && hasMore) {
+      const loadingElement = document.createElement('div');
+      loadingElement.className = 'loading-state';
+      loadingElement.innerHTML = '<div class="loading-spinner-small"></div><span class="loading-text">正在加载更多…</span>';
+      articlesContainer.appendChild(loadingElement);
     }
     
     console.log('过滤文章加载完成');
@@ -1975,14 +1957,11 @@ async function performSearch(page = 1, size = pageSize, append = false) {
     }
     
     console.log('开始搜索文章:', query, { page, size, append });
-    const offset = (page - 1) * size;
-    const results = await invoke('search_articles', { query, limit: size, offset: offset, feedId: currentFeedId });
-    console.log('搜索完成，找到', results.length, '篇文章');
-    
-    // 搜索结果总数计算：使用搜索API获取总数
-    // 注意：当前search_articles API已经返回了所有匹配结果，所以直接使用其长度
-    // 后续可以优化为专门的搜索结果计数API
+    // 只调用一次search_articles获取所有结果
     const allResults = await invoke('search_articles', { query, limit: 1000, offset: 0, feedId: currentFeedId });
+    console.log('搜索完成，找到', allResults.length, '篇文章');
+    
+    // 计算总页数
     totalArticles = allResults.length;
     totalPages = Math.ceil(totalArticles / size);
     
@@ -2001,22 +1980,27 @@ async function performSearch(page = 1, size = pageSize, append = false) {
       hasMore = true;
     }
     
-    // 检查是否还有更多数据
-    if (results.length < size || offset + results.length >= totalArticles) {
-      hasMore = false;
-      // 移除加载状态
-      const loadingElement = articlesContainer.querySelector('.loading-state');
-      if (loadingElement) {
-        loadingElement.remove();
-      }
-    }
+    // 计算当前页的偏移量
+    const offset = (page - 1) * size;
     
-    if (results.length === 0 && page === 1) {
+    // 截取当前页的结果
+    const currentPageResults = allResults.slice(offset, offset + size);
+    
+    // 检查是否还有更多数据
+    hasMore = offset + currentPageResults.length < totalArticles;
+    
+    if (currentPageResults.length === 0 && page === 1) {
       articlesContainer.innerHTML = '<div class="empty-state"><p>未找到匹配的文章</p></div>';
       return;
     }
     
-    results.forEach(([article, feedName]) => {
+    currentPageResults.forEach(([article, feedName]) => {
+      // 检查是否已存在该文章，如果存在则跳过
+      if (document.querySelector(`[data-article-id="${article.id}"]`)) {
+        console.warn('文章已存在，跳过渲染:', article.id);
+        return;
+      }
+      
       const articleItem = document.createElement('div');
       articleItem.className = `article-item ${article.is_read ? '' : 'unread'}`;
       articleItem.dataset.articleId = article.id;
@@ -2056,17 +2040,12 @@ async function performSearch(page = 1, size = pageSize, append = false) {
     const loadingElements = articlesContainer.querySelectorAll('.loading-state');
     loadingElements.forEach(element => element.remove());
     
-    // 检查是否还有更多数据
-    if (results.length < size || offset + results.length >= totalArticles) {
-      hasMore = false;
-    } else {
-      // 只有在追加模式且有更多数据时，才显示"正在加载更多"提示
-      if (append) {
-        const loadingElement = document.createElement('div');
-        loadingElement.className = 'loading-state';
-        loadingElement.innerHTML = '<div class="loading-spinner-small"></div><span class="loading-text">正在加载更多…</span>';
-        articlesContainer.appendChild(loadingElement);
-      }
+    // 只有在追加模式且有更多数据时，才显示"正在加载更多"提示
+    if (append && hasMore) {
+      const loadingElement = document.createElement('div');
+      loadingElement.className = 'loading-state';
+      loadingElement.innerHTML = '<div class="loading-spinner-small"></div><span class="loading-text">正在加载更多…</span>';
+      articlesContainer.appendChild(loadingElement);
     }
     
   } catch (error) {
