@@ -224,6 +224,17 @@ impl DbManager {
             [],
         )?;
 
+        // 创建黑名单表
+        conn.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS blacklist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                keyword TEXT NOT NULL UNIQUE
+            )
+            "#,
+            [],
+        )?;
+
         // 创建触发器，自动更新FTS表
         conn.execute(
             r#"
@@ -444,25 +455,139 @@ impl DbManager {
         }
     }
     
-    /// 获取过滤条件下的文章总数
-    pub fn get_filtered_article_count(&self, filter: &str, feed_id: Option<i64>) -> Result<u32> {
-        let sql = match (feed_id, filter) {
-            (Some(_id), "unread") => "SELECT COUNT(*) FROM articles WHERE feed_id = ? AND is_read = FALSE",
-            (Some(_id), "favorite") => "SELECT COUNT(*) FROM articles WHERE feed_id = ? AND is_favorite = TRUE",
-            (Some(_id), _) => "SELECT COUNT(*) FROM articles WHERE feed_id = ?",
-            (None, "unread") => "SELECT COUNT(*) FROM articles WHERE is_read = FALSE",
-            (None, "favorite") => "SELECT COUNT(*) FROM articles WHERE is_favorite = TRUE",
-            (None, _) => "SELECT COUNT(*) FROM articles",
-        };
-        
-        match feed_id {
-            Some(id) => {
-                let count: u32 = self.conn.query_row(sql, params![id], |row| row.get(0))?;
-                Ok(count)
+    /// 获取过滤条件下的文章总数，支持分组过滤
+    pub fn get_filtered_article_count(&self, filter: &str, feed_id: Option<i64>, group_id: Option<i64>, is_ungrouped: bool) -> Result<u32> {
+        if is_ungrouped {
+            // 特殊处理"ungrouped"分组（group_id为NULL）
+            match filter {
+                "unread" => {
+                    let count: u32 = self.conn.query_row(
+                        "SELECT COUNT(*) FROM articles WHERE is_read = FALSE AND feed_id IN (SELECT id FROM feeds WHERE group_id IS NULL)",
+                        [],
+                        |row| row.get(0)
+                    )?;
+                    Ok(count)
+                },
+                "favorite" => {
+                    let count: u32 = self.conn.query_row(
+                        "SELECT COUNT(*) FROM articles WHERE is_favorite = TRUE AND feed_id IN (SELECT id FROM feeds WHERE group_id IS NULL)",
+                        [],
+                        |row| row.get(0)
+                    )?;
+                    Ok(count)
+                },
+                _ => {
+                    let count: u32 = self.conn.query_row(
+                        "SELECT COUNT(*) FROM articles WHERE feed_id IN (SELECT id FROM feeds WHERE group_id IS NULL)",
+                        [],
+                        |row| row.get(0)
+                    )?;
+                    Ok(count)
+                },
             }
-            None => {
-                let count: u32 = self.conn.query_row(sql, [], |row| row.get(0))?;
-                Ok(count)
+        } else if let Some(group_id) = group_id {
+            // 有分组过滤，需要JOIN feeds表
+            match (feed_id, filter) {
+                (Some(id), "unread") => {
+                    let count: u32 = self.conn.query_row(
+                        "SELECT COUNT(*) FROM articles WHERE feed_id = ? AND is_read = FALSE AND feed_id IN (SELECT id FROM feeds WHERE group_id = ?)",
+                        params![id, group_id],
+                        |row| row.get(0)
+                    )?;
+                    Ok(count)
+                },
+                (Some(id), "favorite") => {
+                    let count: u32 = self.conn.query_row(
+                        "SELECT COUNT(*) FROM articles WHERE feed_id = ? AND is_favorite = TRUE AND feed_id IN (SELECT id FROM feeds WHERE group_id = ?)",
+                        params![id, group_id],
+                        |row| row.get(0)
+                    )?;
+                    Ok(count)
+                },
+                (Some(id), _) => {
+                    let count: u32 = self.conn.query_row(
+                        "SELECT COUNT(*) FROM articles WHERE feed_id = ? AND feed_id IN (SELECT id FROM feeds WHERE group_id = ?)",
+                        params![id, group_id],
+                        |row| row.get(0)
+                    )?;
+                    Ok(count)
+                },
+                (None, "unread") => {
+                    let count: u32 = self.conn.query_row(
+                        "SELECT COUNT(*) FROM articles WHERE is_read = FALSE AND feed_id IN (SELECT id FROM feeds WHERE group_id = ?)",
+                        params![group_id],
+                        |row| row.get(0)
+                    )?;
+                    Ok(count)
+                },
+                (None, "favorite") => {
+                    let count: u32 = self.conn.query_row(
+                        "SELECT COUNT(*) FROM articles WHERE is_favorite = TRUE AND feed_id IN (SELECT id FROM feeds WHERE group_id = ?)",
+                        params![group_id],
+                        |row| row.get(0)
+                    )?;
+                    Ok(count)
+                },
+                (None, _) => {
+                    let count: u32 = self.conn.query_row(
+                        "SELECT COUNT(*) FROM articles WHERE feed_id IN (SELECT id FROM feeds WHERE group_id = ?)",
+                        params![group_id],
+                        |row| row.get(0)
+                    )?;
+                    Ok(count)
+                },
+            }
+        } else {
+            // 没有分组过滤，使用原始查询
+            match (feed_id, filter) {
+                (Some(id), "unread") => {
+                    let count: u32 = self.conn.query_row(
+                        "SELECT COUNT(*) FROM articles WHERE feed_id = ? AND is_read = FALSE",
+                        params![id],
+                        |row| row.get(0)
+                    )?;
+                    Ok(count)
+                },
+                (Some(id), "favorite") => {
+                    let count: u32 = self.conn.query_row(
+                        "SELECT COUNT(*) FROM articles WHERE feed_id = ? AND is_favorite = TRUE",
+                        params![id],
+                        |row| row.get(0)
+                    )?;
+                    Ok(count)
+                },
+                (Some(id), _) => {
+                    let count: u32 = self.conn.query_row(
+                        "SELECT COUNT(*) FROM articles WHERE feed_id = ?",
+                        params![id],
+                        |row| row.get(0)
+                    )?;
+                    Ok(count)
+                },
+                (None, "unread") => {
+                    let count: u32 = self.conn.query_row(
+                        "SELECT COUNT(*) FROM articles WHERE is_read = FALSE",
+                        [],
+                        |row| row.get(0)
+                    )?;
+                    Ok(count)
+                },
+                (None, "favorite") => {
+                    let count: u32 = self.conn.query_row(
+                        "SELECT COUNT(*) FROM articles WHERE is_favorite = TRUE",
+                        [],
+                        |row| row.get(0)
+                    )?;
+                    Ok(count)
+                },
+                (None, _) => {
+                    let count: u32 = self.conn.query_row(
+                        "SELECT COUNT(*) FROM articles",
+                        [],
+                        |row| row.get(0)
+                    )?;
+                    Ok(count)
+                },
             }
         }
     }
@@ -1265,6 +1390,55 @@ impl DbManager {
     }
 
     /// 获取默认AI平台
+
+    /// 添加黑名单关键字
+    pub fn add_blacklist_keyword(&mut self, keyword: &str) -> Result<i64> {
+        // 开始事务
+        let tx = self.conn.transaction()?;
+        
+        let id = tx.query_row(
+            r#"INSERT INTO blacklist (keyword) VALUES (?) RETURNING id"#,
+            params![keyword],
+            |row| row.get(0)
+        )?;
+        
+        // 提交事务
+        tx.commit()?;
+        
+        Ok(id)
+    }
+
+    /// 删除黑名单关键字
+    pub fn delete_blacklist_keyword(&mut self, keyword: &str) -> Result<()> {
+        // 开始事务
+        let tx = self.conn.transaction()?;
+        
+        tx.execute(
+            "DELETE FROM blacklist WHERE keyword = ?",
+            params![keyword],
+        )?;
+        
+        // 提交事务
+        tx.commit()?;
+        
+        Ok(())
+    }
+
+    /// 获取所有黑名单关键字
+    pub fn get_all_blacklist_keywords(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT keyword FROM blacklist ORDER BY keyword")?;
+        let keywords = stmt.query_map([], |row| {
+            Ok(row.get(0)?) 
+        })?
+        .collect::<Result<Vec<_>>>()?;
+        
+        Ok(keywords)
+    }
+
+    /// 获取所有黑名单关键字（用于快速检查）
+    pub fn get_blacklist_keywords(&self) -> Result<Vec<String>> {
+        self.get_all_blacklist_keywords()
+    }
     pub fn get_default_ai_platform(&self) -> Result<Option<AIPlatform>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, api_url, api_key, api_model, is_default 

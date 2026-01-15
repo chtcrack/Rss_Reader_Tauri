@@ -259,6 +259,80 @@ function initEventListeners() {
   deleteAIPlatformModal = document.getElementById('delete-ai-platform-modal');
   confirmDeleteAIPlatformBtn = document.getElementById('confirm-delete-ai-platform');
   
+  // 黑名单管理相关元素
+  const blacklistKeywordInput = document.getElementById('blacklist-keyword-input');
+  const addBlacklistBtn = document.getElementById('add-blacklist-btn');
+  const blacklistList = document.getElementById('blacklist-list');
+  
+  // 加载黑名单关键字列表
+  async function loadBlacklistKeywords() {
+    try {
+      const keywords = await invoke('get_all_blacklist_keywords');
+      renderBlacklistKeywords(keywords);
+    } catch (error) {
+      console.error('Failed to load blacklist keywords:', error);
+      alert('加载黑名单关键字失败: ' + error);
+    }
+  }
+  
+  // 渲染黑名单关键字列表
+  function renderBlacklistKeywords(keywords) {
+    blacklistList.innerHTML = '';
+    keywords.forEach((keyword, index) => {
+      const keywordItem = document.createElement('div');
+      keywordItem.className = 'blacklist-item';
+      keywordItem.innerHTML = `
+        <span class="blacklist-keyword">${keyword}</span>
+        <button class="delete-blacklist-btn" data-index="${index}">🗑️</button>
+      `;
+      blacklistList.appendChild(keywordItem);
+    });
+    
+    // 添加删除按钮事件监听
+    const deleteBtns = blacklistList.querySelectorAll('.delete-blacklist-btn');
+    deleteBtns.forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        const keyword = keywords[e.target.dataset.index];
+        try {
+          await invoke('delete_blacklist_keyword', { keyword });
+          await loadBlacklistKeywords();
+        } catch (error) {
+          console.error('Failed to delete blacklist keyword:', error);
+          alert('删除黑名单关键字失败: ' + error);
+        }
+      });
+    });
+  }
+  
+  // 添加黑名单关键字事件
+  if (addBlacklistBtn) {
+    addBlacklistBtn.addEventListener('click', async () => {
+      const keyword = blacklistKeywordInput.value.trim();
+      if (!keyword) {
+        alert('请输入要屏蔽的关键字');
+        return;
+      }
+      
+      try {
+        await invoke('add_blacklist_keyword', { keyword });
+        blacklistKeywordInput.value = '';
+        await loadBlacklistKeywords();
+      } catch (error) {
+        console.error('Failed to add blacklist keyword:', error);
+        alert('添加黑名单关键字失败: ' + error);
+      }
+    });
+  }
+  
+  // 按下回车键添加黑名单关键字
+  if (blacklistKeywordInput) {
+    blacklistKeywordInput.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') {
+        addBlacklistBtn.click();
+      }
+    });
+  }
+  
   // 自动更新设置
   const updateIntervalSelect = document.getElementById('update-interval');
   const saveUpdateIntervalBtn = document.getElementById('save-update-interval');
@@ -266,6 +340,7 @@ function initEventListeners() {
   if (settingsBtn) {
     settingsBtn.addEventListener('click', async () => {
       await loadAIPlatforms();
+      await loadBlacklistKeywords();
       aiPlatformsModal.classList.add('show');
     });
   }
@@ -1739,7 +1814,7 @@ async function loadFilteredArticles(page = 1, size = pageSize, append = false) {
       currentPage = page;
     }
     
-    let articles;
+
     const offset = (page - 1) * size;
     
     // 获取分组下的所有RSS源（如果有分组过滤）
@@ -1753,61 +1828,53 @@ async function loadFilteredArticles(page = 1, size = pageSize, append = false) {
       groupFeedIds = groupFeeds.map(feed => feed.id);
     }
     
-    // 获取过滤条件下的所有相关文章用于计算总页数
-    let allFilteredArticles;
+    // 获取准确的文章总数
+    totalArticles = await invoke('get_filtered_article_count', { 
+      filter: currentFilter, 
+      feedId: currentFeedId,
+      groupId: currentGroupId === 'ungrouped' ? null : currentGroupId,
+      isUngrouped: currentGroupId === 'ungrouped' 
+    });
+    totalPages = Math.ceil(totalArticles / size);
+    
+    // 获取当前页的文章
+    let currentPageArticles;
     switch (currentFilter) {
       case 'unread':
         if (currentFeedId) {
-          // 获取特定源的所有未读文章
-          const allArticles = await invoke('get_articles_by_feed', { feedId: currentFeedId, limit: 1000, offset: 0 });
-          allFilteredArticles = groupFeedIds.length > 0 
-            ? allArticles.filter(article => !article.is_read && groupFeedIds.includes(article.feed_id))
-            : allArticles.filter(article => !article.is_read);
+          // 获取特定源的未读文章
+          currentPageArticles = await invoke('get_unread_articles_by_feed', { feedId: currentFeedId, limit: size, offset: offset });
         } else {
           // 获取所有未读文章
-          const allArticles = await invoke('get_unread_articles', { limit: 1000, offset: 0 });
-          allFilteredArticles = groupFeedIds.length > 0 
-            ? allArticles.filter(article => groupFeedIds.includes(article.feed_id))
-            : allArticles;
+          currentPageArticles = await invoke('get_unread_articles', { limit: size, offset: offset });
         }
         break;
       case 'favorite':
         if (currentFeedId) {
-          // 获取特定源的所有文章
-          const allArticles = await invoke('get_articles_by_feed', { feedId: currentFeedId, limit: 1000, offset: 0 });
-          allFilteredArticles = groupFeedIds.length > 0 
-            ? allArticles.filter(article => article.is_favorite && groupFeedIds.includes(article.feed_id))
-            : allArticles.filter(article => article.is_favorite);
+          // 获取特定源的收藏文章
+          currentPageArticles = await invoke('get_favorite_articles_by_feed', { feedId: currentFeedId, limit: size, offset: offset });
         } else {
           // 获取所有收藏文章
-          const allArticles = await invoke('get_favorite_articles', { limit: 1000, offset: 0 });
-          allFilteredArticles = groupFeedIds.length > 0 
-            ? allArticles.filter(article => groupFeedIds.includes(article.feed_id))
-            : allArticles;
+          currentPageArticles = await invoke('get_favorite_articles', { limit: size, offset: offset });
         }
         break;
       default:
         if (currentFeedId) {
-          // 获取特定源的所有文章
-          const allArticles = await invoke('get_articles_by_feed', { feedId: currentFeedId, limit: 1000, offset: 0 });
-          allFilteredArticles = groupFeedIds.length > 0 
-            ? allArticles.filter(article => groupFeedIds.includes(article.feed_id))
-            : allArticles;
+          // 获取特定源的文章
+          currentPageArticles = await invoke('get_articles_by_feed', { feedId: currentFeedId, limit: size, offset: offset });
         } else {
           // 获取所有文章
-          const allArticles = await invoke('get_all_articles', { limit: 1000, offset: 0 });
-          allFilteredArticles = groupFeedIds.length > 0 
-            ? allArticles.filter(article => groupFeedIds.includes(article.feed_id))
-            : allArticles;
+          currentPageArticles = await invoke('get_all_articles', { limit: size, offset: offset });
         }
     }
     
-    // 更新总文章数和总页数
-    totalArticles = allFilteredArticles.length;
-    totalPages = Math.ceil(totalArticles / size);
+    // 如果有分组过滤，进一步筛选当前页的文章
+    let articles = currentPageArticles;
+    if (groupFeedIds.length > 0) {
+      articles = currentPageArticles.filter(article => groupFeedIds.includes(article.feed_id));
+    }
     
-    // 截取当前页的文章
-    articles = allFilteredArticles.slice(offset, offset + size);
+
     console.log(`成功加载文章:`, articles.length, '篇');
     if (groupFeedIds.length > 0) {
       console.log(`成功过滤分组 ${currentGroupId} 的文章:`, articles.length, '篇');

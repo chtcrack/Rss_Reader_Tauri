@@ -173,6 +173,22 @@ impl RssParser {
         }
     }
 
+    /// 检查文章标题和内容是否包含黑名单关键字
+    pub fn check_blacklist(&self, title: &str, content: &str, blacklist: &[String]) -> (String, String) {
+        // 检查标题或内容是否包含任何黑名单关键字
+        let contains_blacklist = blacklist.iter().any(|keyword| {
+            title.contains(keyword) || content.contains(keyword)
+        });
+        
+        if contains_blacklist {
+            // 如果包含黑名单关键字，替换标题和内容为"已被屏蔽"
+            ("已被屏蔽".to_string(), "已被屏蔽".to_string())
+        } else {
+            // 否则返回原始标题和内容
+            (title.to_string(), content.to_string())
+        }
+    }
+
     /// 将RSS项转换为文章模型
     pub fn rss_item_to_article(&self, item: &Item, feed_id: i64, base_url: &str) -> Article {
         let pub_date = item.pub_date()
@@ -200,6 +216,9 @@ impl RssParser {
             .unwrap_or_else(|| item.description().unwrap_or(""))
             .to_string();
 
+        // 修复内容中的图片URL
+        let content = self.fix_content_images(&content, base_url);
+
         let thumbnail = item.enclosure()
             .and_then(|e| {
                 if e.mime_type().starts_with("image/") {
@@ -218,10 +237,14 @@ impl RssParser {
         let original_link = item.link().unwrap_or("");
         let normalized_link = self.normalize_link(original_link);
 
+        // 这里暂时不应用黑名单过滤，因为需要从数据库获取黑名单关键字
+        // 黑名单过滤将在lib.rs中处理
+        let title = item.title().unwrap_or("无标题").to_string();
+
         Article {
             id: 0, // 数据库将自动生成
             feed_id,
-            title: item.title().unwrap_or("无标题").to_string(),
+            title,
             content,
             pub_date,
             link: normalized_link,
@@ -267,6 +290,9 @@ impl RssParser {
             .unwrap_or_default()
             .to_string();
 
+        // 修复内容中的图片URL
+        let content = self.fix_content_images(&content, base_url);
+
         // 处理链接
         let original_link = entry.links().iter()
             .find(|link| link.rel() == "alternate")
@@ -279,10 +305,14 @@ impl RssParser {
             .next()
             .map(|author| author.name().to_string());
 
+        // 这里暂时不应用黑名单过滤，因为需要从数据库获取黑名单关键字
+        // 黑名单过滤将在lib.rs中处理
+        let title = entry.title().to_string();
+
         Article {
             id: 0, // 数据库将自动生成
             feed_id,
-            title: entry.title().to_string(),
+            title,
             content,
             pub_date,
             link: normalized_link,
@@ -337,6 +367,63 @@ impl RssParser {
         // 处理相对路径
         let new_url = base_url.join(url).ok()?;
         Some(new_url.to_string())
+    }
+    
+    /// 修复HTML内容中的所有图片URL
+    fn fix_content_images(&self, content: &str, base_url: &str) -> String {
+        let document = scraper::Html::parse_document(content);
+        let img_selector = scraper::Selector::parse("img").unwrap();
+        
+        // 检查是否有需要修复的图片
+        let mut has_images_to_fix = false;
+        for img_element in document.select(&img_selector) {
+            if let Some(src) = img_element.value().attr("src") {
+                // 如果图片URL不是完整的绝对路径，则需要修复
+                if !src.starts_with("http://") && !src.starts_with("https://") {
+                    has_images_to_fix = true;
+                    break;
+                }
+            }
+        }
+        
+        // 如果没有需要修复的图片，直接返回原始内容
+        if !has_images_to_fix {
+            return content.to_string();
+        }
+        
+        // 需要修复图片URL，重新构建HTML内容
+        let mut result = String::new();
+        let mut last_end = 0;
+        
+        for img_element in document.select(&img_selector) {
+            let html = img_element.html();
+            let start_pos = content.find(&html).unwrap_or(0);
+            
+            // 添加图片之前的内容
+            result.push_str(&content[last_end..start_pos]);
+            
+            // 修复图片URL
+            if let Some(src) = img_element.value().attr("src") {
+                if let Some(fixed_url) = self.fix_image_url(src, base_url) {
+                    // 替换src属性
+                    let fixed_html = html.replace(src, &fixed_url);
+                    result.push_str(&fixed_html);
+                } else {
+                    result.push_str(&html);
+                }
+            } else {
+                result.push_str(&html);
+            }
+            
+            last_end = start_pos + html.len();
+        }
+        
+        // 添加剩余内容
+        if last_end < content.len() {
+            result.push_str(&content[last_end..]);
+        }
+        
+        result
     }
 }
 

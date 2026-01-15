@@ -601,20 +601,56 @@ async fn get_feeds_by_group(app_state: State<'_, AppState>, group_id: i64) -> Re
 #[tauri::command(async)]
 async fn get_articles_by_feed(app_state: State<'_, AppState>, feedId: i64, limit: u32, offset: u32) -> Result<Vec<Article>, String> {
     let db_manager = app_state.db_manager.lock().await;
-    db_manager.get_articles_by_feed(feedId, limit, offset).map_err(|e| {
+    let mut articles = db_manager.get_articles_by_feed(feedId, limit, offset).map_err(|e| {
         eprintln!("Failed to get articles by feed from database: {}", e);
         format!("Failed to get articles by feed: {}", e)
-    })
+    })?;
+    
+    // 获取黑名单关键字
+    let blacklist = db_manager.get_all_blacklist_keywords().map_err(|e| {
+        eprintln!("Failed to get blacklist keywords from database: {}", e);
+        format!("Failed to get blacklist keywords: {}", e)
+    })?;
+    
+    // 使用RSS解析器的黑名单检查功能
+    let parser = crate::rss::RssParser::new();
+    
+    // 检查每篇文章的标题和内容
+    for article in &mut articles {
+        let (title, content) = parser.check_blacklist(&article.title, &article.content, &blacklist);
+        article.title = title;
+        article.content = content;
+    }
+    
+    Ok(articles)
 }
 
 // Tauri命令：获取所有文章
 #[tauri::command(async)]
 async fn get_all_articles(app_state: State<'_, AppState>, limit: u32, offset: u32) -> Result<Vec<Article>, String> {
     let db_manager = app_state.db_manager.lock().await;
-    db_manager.get_all_articles(limit, offset).map_err(|e| {
+    let mut articles = db_manager.get_all_articles(limit, offset).map_err(|e| {
         eprintln!("Failed to get all articles from database: {}", e);
         format!("Failed to get all articles: {}", e)
-    })
+    })?;
+    
+    // 获取黑名单关键字
+    let blacklist = db_manager.get_all_blacklist_keywords().map_err(|e| {
+        eprintln!("Failed to get blacklist keywords from database: {}", e);
+        format!("Failed to get blacklist keywords: {}", e)
+    })?;
+    
+    // 使用RSS解析器的黑名单检查功能
+    let parser = crate::rss::RssParser::new();
+    
+    // 检查每篇文章的标题和内容
+    for article in &mut articles {
+        let (title, content) = parser.check_blacklist(&article.title, &article.content, &blacklist);
+        article.title = title;
+        article.content = content;
+    }
+    
+    Ok(articles)
 }
 
 // Tauri命令：标记文章为收藏
@@ -631,40 +667,112 @@ async fn toggle_favorite(app_state: State<'_, AppState>, articleId: i64, isFavor
 #[tauri::command(async)]
 async fn get_favorite_articles(app_state: State<'_, AppState>, limit: u32, offset: u32) -> Result<Vec<Article>, String> {
     let db_manager = app_state.db_manager.lock().await;
-    db_manager.get_favorite_articles(limit, offset).map_err(|e| {
+    let mut articles = db_manager.get_favorite_articles(limit, offset).map_err(|e| {
         eprintln!("Failed to get favorite articles from database: {}", e);
         format!("Failed to get favorite articles: {}", e)
-    })
+    })?;
+    
+    // 获取黑名单关键字
+    let blacklist = db_manager.get_all_blacklist_keywords().map_err(|e| {
+        eprintln!("Failed to get blacklist keywords from database: {}", e);
+        format!("Failed to get blacklist keywords: {}", e)
+    })?;
+    
+    // 使用RSS解析器的黑名单检查功能
+    let parser = crate::rss::RssParser::new();
+    
+    // 检查每篇文章的标题和内容
+    for article in &mut articles {
+        let (title, content) = parser.check_blacklist(&article.title, &article.content, &blacklist);
+        article.title = title;
+        article.content = content;
+    }
+    
+    Ok(articles)
 }
 
 // Tauri命令：根据feed_id获取收藏文章
 #[tauri::command(async)]
 async fn get_favorite_articles_by_feed(app_state: State<'_, AppState>, feedId: i64, limit: u32, offset: u32) -> Result<Vec<Article>, String> {
     let db_manager = app_state.db_manager.lock().await;
-    db_manager.get_favorite_articles_by_feed(feedId, limit, offset).map_err(|e| {
+    let mut articles = db_manager.get_favorite_articles_by_feed(feedId, limit, offset).map_err(|e| {
         eprintln!("Failed to get favorite articles by feed from database: {}", e);
         format!("Failed to get favorite articles by feed: {}", e)
-    })
+    })?;
+    
+    // 获取黑名单关键字
+    let blacklist = db_manager.get_all_blacklist_keywords().map_err(|e| {
+        eprintln!("Failed to get blacklist keywords from database: {}", e);
+        format!("Failed to get blacklist keywords: {}", e)
+    })?;
+    
+    // 使用RSS解析器的黑名单检查功能
+    let parser = crate::rss::RssParser::new();
+    
+    // 检查每篇文章的标题和内容
+    for article in &mut articles {
+        let (title, content) = parser.check_blacklist(&article.title, &article.content, &blacklist);
+        article.title = title;
+        article.content = content;
+    }
+    
+    Ok(articles)
 }
 
 // Tauri命令：获取未读文章
 #[tauri::command(async)]
 async fn get_unread_articles(app_state: State<'_, AppState>, limit: u32, offset: u32) -> Result<Vec<Article>, String> {
     let db_manager = app_state.db_manager.lock().await;
-    db_manager.get_unread_articles(limit, offset).map_err(|e| {
+    let mut articles = db_manager.get_unread_articles(limit, offset).map_err(|e| {
         eprintln!("Failed to get unread articles from database: {}", e);
         format!("Failed to get unread articles: {}", e)
-    })
+    })?;
+    
+    // 获取黑名单关键字
+    let blacklist = db_manager.get_all_blacklist_keywords().map_err(|e| {
+        eprintln!("Failed to get blacklist keywords from database: {}", e);
+        format!("Failed to get blacklist keywords: {}", e)
+    })?;
+    
+    // 使用RSS解析器的黑名单检查功能
+    let parser = crate::rss::RssParser::new();
+    
+    // 检查每篇文章的标题和内容
+    for article in &mut articles {
+        let (title, content) = parser.check_blacklist(&article.title, &article.content, &blacklist);
+        article.title = title;
+        article.content = content;
+    }
+    
+    Ok(articles)
 }
 
 // Tauri命令：根据feed_id获取未读文章
 #[tauri::command(async)]
 async fn get_unread_articles_by_feed(app_state: State<'_, AppState>, feedId: i64, limit: u32, offset: u32) -> Result<Vec<Article>, String> {
     let db_manager = app_state.db_manager.lock().await;
-    db_manager.get_unread_articles_by_feed(feedId, limit, offset).map_err(|e| {
+    let mut articles = db_manager.get_unread_articles_by_feed(feedId, limit, offset).map_err(|e| {
         eprintln!("Failed to get unread articles by feed from database: {}", e);
         format!("Failed to get unread articles by feed: {}", e)
-    })
+    })?;
+    
+    // 获取黑名单关键字
+    let blacklist = db_manager.get_all_blacklist_keywords().map_err(|e| {
+        eprintln!("Failed to get blacklist keywords from database: {}", e);
+        format!("Failed to get blacklist keywords: {}", e)
+    })?;
+    
+    // 使用RSS解析器的黑名单检查功能
+    let parser = crate::rss::RssParser::new();
+    
+    // 检查每篇文章的标题和内容
+    for article in &mut articles {
+        let (title, content) = parser.check_blacklist(&article.title, &article.content, &blacklist);
+        article.title = title;
+        article.content = content;
+    }
+    
+    Ok(articles)
 }
 
 // Tauri命令：获取文章总数
@@ -678,10 +786,10 @@ async fn get_article_count(app_state: State<'_, AppState>, feed_id: Option<i64>)
 }
 
 // Tauri命令：获取过滤条件下的文章总数
-#[tauri::command(async)]
-async fn get_filtered_article_count(app_state: State<'_, AppState>, filter: &str, feed_id: Option<i64>) -> Result<u32, String> {
+#[tauri::command(async, rename_all = "camelCase")]
+async fn get_filtered_article_count(app_state: State<'_, AppState>, filter: &str, feed_id: Option<i64>, group_id: Option<i64>, is_ungrouped: bool) -> Result<u32, String> {
     let db_manager = app_state.db_manager.lock().await;
-    db_manager.get_filtered_article_count(filter, feed_id).map_err(|e| {
+    db_manager.get_filtered_article_count(filter, feed_id, group_id, is_ungrouped).map_err(|e| {
         eprintln!("Failed to get filtered article count from database: {}", e);
         format!("Failed to get filtered article count: {}", e)
     })
@@ -822,6 +930,36 @@ async fn set_default_ai_platform(app_state: State<'_, AppState>, platform_id: i6
     let _translator = AI_TRANSLATOR.get_translator().await.with_default_platform(new_default_platform);
     
     Ok(())
+}
+
+// Tauri命令：添加黑名单关键字
+#[tauri::command(async)]
+async fn add_blacklist_keyword(app_state: State<'_, AppState>, keyword: String) -> Result<i64, String> {
+    let mut db_manager = app_state.db_manager.lock().await;
+    db_manager.add_blacklist_keyword(&keyword).map_err(|e| {
+        eprintln!("Failed to add blacklist keyword to database: {}", e);
+        format!("Failed to add blacklist keyword: {}", e)
+    })
+}
+
+// Tauri命令：删除黑名单关键字
+#[tauri::command(async)]
+async fn delete_blacklist_keyword(app_state: State<'_, AppState>, keyword: String) -> Result<(), String> {
+    let mut db_manager = app_state.db_manager.lock().await;
+    db_manager.delete_blacklist_keyword(&keyword).map_err(|e| {
+        eprintln!("Failed to delete blacklist keyword from database: {}", e);
+        format!("Failed to delete blacklist keyword: {}", e)
+    })
+}
+
+// Tauri命令：获取所有黑名单关键字
+#[tauri::command(async)]
+async fn get_all_blacklist_keywords(app_state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let db_manager = app_state.db_manager.lock().await;
+    db_manager.get_all_blacklist_keywords().map_err(|e| {
+        eprintln!("Failed to get blacklist keywords from database: {}", e);
+        format!("Failed to get blacklist keywords: {}", e)
+    })
 }
 
 // Tauri命令：更新自动更新间隔
@@ -1866,6 +2004,9 @@ pub fn run() {
             delete_article,
             open_link,
             update_update_interval,
+            add_blacklist_keyword,
+            delete_blacklist_keyword,
+            get_all_blacklist_keywords,
             ai_chat,
             create_chat_session,
             get_chat_sessions,
