@@ -1,8 +1,8 @@
-use crate::models::{Article, Feed, FeedGroup, AIPlatform};
-use rusqlite::{Connection, Result, params};
+use crate::models::{AIPlatform, Article, Feed, FeedGroup};
 use chrono::{DateTime, TimeZone, Utc};
+use opml::{OPML, Outline};
+use rusqlite::{Connection, Result, params};
 use std::path::PathBuf;
-use opml::{Outline, OPML};
 
 /// 数据库管理器
 pub struct DbManager {
@@ -14,12 +14,12 @@ impl Drop for DbManager {
         // 简化析构函数，只保留必要的清理逻辑
         // Connection类型会自动处理连接关闭
         println!("数据库连接正在关闭...");
-        
+
         // 执行CHECKPOINT，确保所有数据都写入磁盘
         if let Err(e) = self.conn.execute("CHECKPOINT", []) {
             eprintln!("警告: 数据库检查点失败: {}", e);
         }
-        
+
         // 执行VACUUM命令压缩数据库，回收未使用的空间
         println!("正在执行数据库压缩...");
         if let Err(e) = self.conn.execute("VACUUM", []) {
@@ -27,7 +27,7 @@ impl Drop for DbManager {
         } else {
             println!("数据库压缩完成");
         }
-        
+
         println!("数据库连接已关闭");
     }
 }
@@ -37,16 +37,17 @@ impl DbManager {
     pub fn new(db_path: &str) -> Result<Self> {
         // 确保数据库目录存在
         if let Some(parent) = PathBuf::from(db_path).parent()
-            && let Err(e) = std::fs::create_dir_all(parent) {
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
             eprintln!("警告: 无法创建数据库目录: {}", e);
         }
-        
+
         // 初始化数据库连接
         let conn = Connection::open(db_path)?;
-        
+
         // 初始化数据库表
         Self::create_tables(&conn)?;
-        
+
         Ok(Self { conn })
     }
 
@@ -98,12 +99,9 @@ impl DbManager {
 
         // 为现有数据库添加last_update_status列（如果不存在）
         if !Self::column_exists(conn, "feeds", "last_update_status")? {
-            conn.execute(
-                "ALTER TABLE feeds ADD COLUMN last_update_status TEXT",
-                [],
-            )?;
+            conn.execute("ALTER TABLE feeds ADD COLUMN last_update_status TEXT", [])?;
         }
-        
+
         // 为现有数据库添加update_attempts列（如果不存在）
         if !Self::column_exists(conn, "feeds", "update_attempts")? {
             conn.execute(
@@ -111,15 +109,12 @@ impl DbManager {
                 [],
             )?;
         }
-        
+
         // 为现有数据库添加next_retry_time列（如果不存在）
         if !Self::column_exists(conn, "feeds", "next_retry_time")? {
-            conn.execute(
-                "ALTER TABLE feeds ADD COLUMN next_retry_time INTEGER",
-                [],
-            )?;
+            conn.execute("ALTER TABLE feeds ADD COLUMN next_retry_time INTEGER", [])?;
         }
-        
+
         // 为现有数据库添加notification_enabled列（如果不存在）
         if !Self::column_exists(conn, "feeds", "notification_enabled")? {
             conn.execute(
@@ -151,10 +146,7 @@ impl DbManager {
 
         // 为现有数据库添加translated_title列（如果不存在）
         if !Self::column_exists(conn, "articles", "translated_title")? {
-            conn.execute(
-                "ALTER TABLE articles ADD COLUMN translated_title TEXT",
-                [],
-            )?;
+            conn.execute("ALTER TABLE articles ADD COLUMN translated_title TEXT", [])?;
         }
 
         // 为现有数据库添加translated_content列（如果不存在）
@@ -272,16 +264,14 @@ impl DbManager {
 
     /// 添加RSS源
     pub fn add_feed(&mut self, feed: &Feed) -> Result<i64> {
-        let last_updated_ts = feed.last_updated.map(|t| {
-            t.timestamp()
-        });
+        let last_updated_ts = feed.last_updated.map(|t| t.timestamp());
 
         let group_id = feed.group_id;
         let last_updated = last_updated_ts.unwrap_or(0);
-        
+
         // 开始事务
         let tx = self.conn.transaction()?;
-        
+
         let id = tx.query_row(
             r#"INSERT INTO feeds (name, url, group_id, last_updated, translate_enabled, notification_enabled) 
                VALUES (?, ?, ?, ?, ?, ?) RETURNING id"#,
@@ -295,77 +285,108 @@ impl DbManager {
             ],
             |row| row.get(0)
         )?;
-        
+
         // 提交事务
         tx.commit()?;
-        
+
         Ok(id)
     }
 
     /// 获取所有RSS源
     pub fn get_all_feeds(&self) -> Result<Vec<Feed>> {
         let mut stmt = self.conn.prepare("SELECT id, name, url, group_id, last_updated, translate_enabled, notification_enabled, last_update_status, update_attempts, next_retry_time FROM feeds ORDER BY name")?;
-        let feeds = stmt.query_map([], |row| {
-            let last_updated = row.get::<_, Option<i64>>(4)?
-                .and_then(|ts| Utc.timestamp_opt(ts, 0).single());
-            let next_retry_time = row.get::<_, Option<i64>>(9)?
-                .and_then(|ts| Utc.timestamp_opt(ts, 0).single());
-            Ok(Feed {
-                id: row.get::<_, i64>(0)?,
-                name: row.get(1)?,
-                url: row.get(2)?,
-                group_id: row.get::<_, Option<i64>>(3)?,
-                last_updated,
-                translate_enabled: row.get(5)?,
-                notification_enabled: row.get(6)?,
-                last_update_status: row.get(7)?,
-                update_attempts: row.get(8)?,
-                next_retry_time,
-            })
-        })?
-        .collect::<Result<Vec<_>>>()?;
+        let feeds = stmt
+            .query_map([], |row| {
+                let last_updated = row
+                    .get::<_, Option<i64>>(4)?
+                    .and_then(|ts| Utc.timestamp_opt(ts, 0).single());
+                let next_retry_time = row
+                    .get::<_, Option<i64>>(9)?
+                    .and_then(|ts| Utc.timestamp_opt(ts, 0).single());
+                Ok(Feed {
+                    id: row.get::<_, i64>(0)?,
+                    name: row.get(1)?,
+                    url: row.get(2)?,
+                    group_id: row.get::<_, Option<i64>>(3)?,
+                    last_updated,
+                    translate_enabled: row.get(5)?,
+                    notification_enabled: row.get(6)?,
+                    last_update_status: row.get(7)?,
+                    update_attempts: row.get(8)?,
+                    next_retry_time,
+                })
+            })?
+            .collect::<Result<Vec<_>>>()?;
         Ok(feeds)
     }
 
     /// 检查文章是否已存在且已有翻译内容
     pub fn article_needs_translation(&self, feed_id: i64, link: &str) -> Result<bool> {
         // 查询文章是否存在以及是否已有翻译标题
-        let result = self.conn.query_row(
-            r#"SELECT translated_title FROM articles WHERE feed_id = ? AND link = ?"#,
-            params![feed_id, link],
-            |row| {
-                let translated_title: Option<String> = row.get(0)?;
-                // 只检查标题是否需要翻译
-                Ok(translated_title.is_none() || translated_title == Some(String::new()))
-            }
-        ).ok();
+        let result = self
+            .conn
+            .query_row(
+                r#"SELECT translated_title FROM articles WHERE feed_id = ? AND link = ?"#,
+                params![feed_id, link],
+                |row| {
+                    let translated_title: Option<String> = row.get(0)?;
+                    // 只检查标题是否需要翻译
+                    Ok(translated_title.is_none() || translated_title == Some(String::new()))
+                },
+            )
+            .ok();
 
         // 如果文章不存在或需要翻译，则返回true
         Ok(result.unwrap_or(true))
     }
 
-    /// 添加或更新文章，返回是否成功添加了新文章
+    /// 添加或更新文章，返回是否成功添加了新文章或更新了翻译内容
     pub fn add_article(&self, article: &Article) -> Result<bool> {
         let pub_date_ts = article.pub_date.timestamp();
 
-        let categories_str = serde_json::to_string(&article.categories)
-            .unwrap_or_else(|_| String::from("[]"));
+        let categories_str = 
+            serde_json::to_string(&article.categories).unwrap_or_else(|_| String::from("[]"));
 
         // 首先尝试获取现有文章的ID
-        let existing_id = self.conn.query_row(
-            r#"SELECT id FROM articles WHERE feed_id = ? AND link = ?"#,
-            params![article.feed_id, article.link.as_str()],
-            |row| {
-                let id: i64 = row.get(0)?; // 只需要检查ID是否存在，不需要获取其他字段
-                Ok(id)
-            }
-        ).ok();
+        let existing_id = self
+            .conn
+            .query_row(
+                r#"SELECT id, translated_title FROM articles WHERE feed_id = ? AND link = ?"#,
+                params![article.feed_id, article.link.as_str()],
+                |row| {
+                    let id: i64 = row.get(0)?;
+                    let translated_title: Option<String> = row.get(1)?;
+                    Ok((id, translated_title))
+                },
+            )
+            .ok();
 
-        if existing_id.is_some() {
-            // 文章已存在，直接跳过，不进行任何更新
+        if let Some((id, existing_translated_title)) = existing_id {
+            // 文章已存在，检查是否需要更新翻译内容
+            // 如果现有文章没有翻译，而新文章有翻译，或者新文章的翻译内容与现有不同，则更新
+            let needs_translation_update = existing_translated_title.is_none() 
+                && (article.translated_title.is_some() || article.translated_content.is_some());
+            
+            if needs_translation_update {
+                // 更新文章的翻译内容
+                let _rows_affected = self.conn.execute(
+                    r#"UPDATE articles 
+                       SET translated_title = ?, translated_content = ? 
+                       WHERE id = ?"#,
+                    params![
+                        article.translated_title.as_deref(),
+                        article.translated_content.as_deref(),
+                        id
+                    ],
+                )?;
+                
+                return Ok(true);
+            }
+            
+            // 不需要更新翻译内容，返回false
             return Ok(false);
         }
-        
+
         // 文章不存在，插入新文章
         let _rows_affected = self.conn.execute(
             r#"INSERT INTO articles (feed_id, title, content, pub_date, link, is_read, is_favorite, thumbnail, author, categories, translated_title, translated_content) 
@@ -385,7 +406,7 @@ impl DbManager {
                 article.translated_content.as_deref()
             ],
         )?;
-        
+
         // 返回是否成功添加了新文章
         Ok(true)
     }
@@ -411,28 +432,28 @@ impl DbManager {
             }
         }
     }
-    
+
     /// 获取所有源的未读计数，返回HashMap<feed_id, unread_count>
     pub fn get_all_unread_counts(&self) -> Result<std::collections::HashMap<i64, u32>> {
         let mut stmt = self.conn.prepare(
             "SELECT feed_id, COUNT(*) as unread_count FROM articles WHERE is_read = FALSE GROUP BY feed_id"
         )?;
-        
+
         let rows = stmt.query_map([], |row| {
             let feed_id: i64 = row.get(0)?;
             let unread_count: u32 = row.get(1)?;
             Ok((feed_id, unread_count))
         })?;
-        
+
         let mut result = std::collections::HashMap::new();
         for row in rows {
             let (feed_id, unread_count) = row?;
             result.insert(feed_id, unread_count);
         }
-        
+
         Ok(result)
     }
-    
+
     /// 获取文章总数
     pub fn get_article_count(&self, feed_id: Option<i64>) -> Result<u32> {
         match feed_id {
@@ -445,18 +466,22 @@ impl DbManager {
                 Ok(count)
             }
             None => {
-                let count: u32 = self.conn.query_row(
-                    "SELECT COUNT(*) FROM articles",
-                    [],
-                    |row| row.get(0),
-                )?;
+                let count: u32 =
+                    self.conn
+                        .query_row("SELECT COUNT(*) FROM articles", [], |row| row.get(0))?;
                 Ok(count)
             }
         }
     }
-    
+
     /// 获取过滤条件下的文章总数，支持分组过滤
-    pub fn get_filtered_article_count(&self, filter: &str, feed_id: Option<i64>, group_id: Option<i64>, is_ungrouped: bool) -> Result<u32> {
+    pub fn get_filtered_article_count(
+        &self,
+        filter: &str,
+        feed_id: Option<i64>,
+        group_id: Option<i64>,
+        is_ungrouped: bool,
+    ) -> Result<u32> {
         if is_ungrouped {
             // 特殊处理"ungrouped"分组（group_id为NULL）
             match filter {
@@ -467,7 +492,7 @@ impl DbManager {
                         |row| row.get(0)
                     )?;
                     Ok(count)
-                },
+                }
                 "favorite" => {
                     let count: u32 = self.conn.query_row(
                         "SELECT COUNT(*) FROM articles WHERE is_favorite = TRUE AND feed_id IN (SELECT id FROM feeds WHERE group_id IS NULL)",
@@ -475,7 +500,7 @@ impl DbManager {
                         |row| row.get(0)
                     )?;
                     Ok(count)
-                },
+                }
                 _ => {
                     let count: u32 = self.conn.query_row(
                         "SELECT COUNT(*) FROM articles WHERE feed_id IN (SELECT id FROM feeds WHERE group_id IS NULL)",
@@ -483,7 +508,7 @@ impl DbManager {
                         |row| row.get(0)
                     )?;
                     Ok(count)
-                },
+                }
             }
         } else if let Some(group_id) = group_id {
             // 有分组过滤，需要JOIN feeds表
@@ -495,7 +520,7 @@ impl DbManager {
                         |row| row.get(0)
                     )?;
                     Ok(count)
-                },
+                }
                 (Some(id), "favorite") => {
                     let count: u32 = self.conn.query_row(
                         "SELECT COUNT(*) FROM articles WHERE feed_id = ? AND is_favorite = TRUE AND feed_id IN (SELECT id FROM feeds WHERE group_id = ?)",
@@ -503,7 +528,7 @@ impl DbManager {
                         |row| row.get(0)
                     )?;
                     Ok(count)
-                },
+                }
                 (Some(id), _) => {
                     let count: u32 = self.conn.query_row(
                         "SELECT COUNT(*) FROM articles WHERE feed_id = ? AND feed_id IN (SELECT id FROM feeds WHERE group_id = ?)",
@@ -511,7 +536,7 @@ impl DbManager {
                         |row| row.get(0)
                     )?;
                     Ok(count)
-                },
+                }
                 (None, "unread") => {
                     let count: u32 = self.conn.query_row(
                         "SELECT COUNT(*) FROM articles WHERE is_read = FALSE AND feed_id IN (SELECT id FROM feeds WHERE group_id = ?)",
@@ -519,7 +544,7 @@ impl DbManager {
                         |row| row.get(0)
                     )?;
                     Ok(count)
-                },
+                }
                 (None, "favorite") => {
                     let count: u32 = self.conn.query_row(
                         "SELECT COUNT(*) FROM articles WHERE is_favorite = TRUE AND feed_id IN (SELECT id FROM feeds WHERE group_id = ?)",
@@ -527,7 +552,7 @@ impl DbManager {
                         |row| row.get(0)
                     )?;
                     Ok(count)
-                },
+                }
                 (None, _) => {
                     let count: u32 = self.conn.query_row(
                         "SELECT COUNT(*) FROM articles WHERE feed_id IN (SELECT id FROM feeds WHERE group_id = ?)",
@@ -535,7 +560,7 @@ impl DbManager {
                         |row| row.get(0)
                     )?;
                     Ok(count)
-                },
+                }
             }
         } else {
             // 没有分组过滤，使用原始查询
@@ -544,50 +569,48 @@ impl DbManager {
                     let count: u32 = self.conn.query_row(
                         "SELECT COUNT(*) FROM articles WHERE feed_id = ? AND is_read = FALSE",
                         params![id],
-                        |row| row.get(0)
+                        |row| row.get(0),
                     )?;
                     Ok(count)
-                },
+                }
                 (Some(id), "favorite") => {
                     let count: u32 = self.conn.query_row(
                         "SELECT COUNT(*) FROM articles WHERE feed_id = ? AND is_favorite = TRUE",
                         params![id],
-                        |row| row.get(0)
+                        |row| row.get(0),
                     )?;
                     Ok(count)
-                },
+                }
                 (Some(id), _) => {
                     let count: u32 = self.conn.query_row(
                         "SELECT COUNT(*) FROM articles WHERE feed_id = ?",
                         params![id],
-                        |row| row.get(0)
+                        |row| row.get(0),
                     )?;
                     Ok(count)
-                },
+                }
                 (None, "unread") => {
                     let count: u32 = self.conn.query_row(
                         "SELECT COUNT(*) FROM articles WHERE is_read = FALSE",
                         [],
-                        |row| row.get(0)
+                        |row| row.get(0),
                     )?;
                     Ok(count)
-                },
+                }
                 (None, "favorite") => {
                     let count: u32 = self.conn.query_row(
                         "SELECT COUNT(*) FROM articles WHERE is_favorite = TRUE",
                         [],
-                        |row| row.get(0)
+                        |row| row.get(0),
                     )?;
                     Ok(count)
-                },
+                }
                 (None, _) => {
-                    let count: u32 = self.conn.query_row(
-                        "SELECT COUNT(*) FROM articles",
-                        [],
-                        |row| row.get(0)
-                    )?;
+                    let count: u32 =
+                        self.conn
+                            .query_row("SELECT COUNT(*) FROM articles", [], |row| row.get(0))?;
                     Ok(count)
-                },
+                }
             }
         }
     }
@@ -611,7 +634,8 @@ impl DbManager {
         for c in input.chars() {
             match c {
                 // FTS5特殊字符列表
-                '[' | ']' | '*' | '?' | '!' | '~' | '"' | '|' | '(' | ')' | '+' | '-' | ':' | '{' | '}' | '^' | '\'' => {
+                '[' | ']' | '*' | '?' | '!' | '~' | '"' | '|' | '(' | ')' | '+' | '-' | ':'
+                | '{' | '}' | '^' | '\'' => {
                     result.push('\\');
                     result.push(c);
                 }
@@ -621,7 +645,12 @@ impl DbManager {
         result
     }
 
-    pub fn search_articles(&self, query: &str, limit: u32, feed_id: Option<i64>) -> Result<Vec<(Article, String)>> {
+    pub fn search_articles(
+        &self,
+        query: &str,
+        limit: u32,
+        feed_id: Option<i64>,
+    ) -> Result<Vec<(Article, String)>> {
         // 使用FTS5进行全文搜索，支持前缀匹配
         // 处理搜索词，先转义特殊字符，再添加通配符支持前缀匹配
         let processed_query = query
@@ -650,8 +679,11 @@ impl DbManager {
 
         // 执行查询，传递feed_id作为参数，当feed_id为None时，会传递NULL
         let results = stmt.query_map(params![processed_query, feed_id, feed_id, limit], |row| {
-            let pub_date = Utc.timestamp_opt(row.get::<_, i64>(4)?, 0).single().unwrap_or(Utc::now());
-            
+            let pub_date = Utc
+                .timestamp_opt(row.get::<_, i64>(4)?, 0)
+                .single()
+                .unwrap_or(Utc::now());
+
             let categories_str: Option<String> = row.get(10)?;
             let categories: Vec<String> = categories_str
                 .as_deref()
@@ -687,29 +719,24 @@ impl DbManager {
     pub fn delete_feed(&mut self, feed_id: i64) -> Result<()> {
         // 开始事务
         let tx = self.conn.transaction()?;
-        
-        tx.execute(
-            "DELETE FROM feeds WHERE id = ?",
-            params![feed_id],
-        )?;
-        
+
+        tx.execute("DELETE FROM feeds WHERE id = ?", params![feed_id])?;
+
         // 提交事务
         tx.commit()?;
-        
+
         Ok(())
     }
 
     /// 更新RSS源
     pub fn update_feed(&mut self, feed: &Feed) -> Result<()> {
-        let last_updated_ts = feed.last_updated.map(|t| {
-            t.timestamp()
-        });
+        let last_updated_ts = feed.last_updated.map(|t| t.timestamp());
 
         let last_updated = last_updated_ts.unwrap_or(0);
-        
+
         // 开始事务
         let tx = self.conn.transaction()?;
-        
+
         tx.execute(
             r#"UPDATE feeds SET name = ?, url = ?, group_id = ?, last_updated = ?, translate_enabled = ?, notification_enabled = ? 
                WHERE id = ?"#,
@@ -723,49 +750,53 @@ impl DbManager {
                 feed.id
             ],
         )?;
-        
+
         // 提交事务
         tx.commit()?;
-        
+
         Ok(())
     }
-    
+
     /// 仅更新RSS源的最后更新时间
-    pub fn update_feed_last_updated(&mut self, feed_id: i64, last_updated: DateTime<Utc>) -> Result<()> {
+    pub fn update_feed_last_updated(
+        &mut self,
+        feed_id: i64,
+        last_updated: DateTime<Utc>,
+    ) -> Result<()> {
         let last_updated_ts = last_updated.timestamp();
-        
+
         // 开始事务
         let tx = self.conn.transaction()?;
-        
+
         tx.execute(
             r#"UPDATE feeds SET last_updated = ? WHERE id = ?"#,
             params![last_updated_ts, feed_id],
         )?;
-        
+
         // 提交事务
         tx.commit()?;
-        
+
         Ok(())
     }
-    
+
     /// 更新RSS源的更新成功状态
     pub fn update_feed_success(&mut self, feed_id: i64, last_updated: DateTime<Utc>) -> Result<()> {
         let last_updated_ts = last_updated.timestamp();
-        
+
         // 开始事务
         let tx = self.conn.transaction()?;
-        
+
         tx.execute(
             r#"UPDATE feeds SET last_updated = ?, last_update_status = 'success', update_attempts = 0, next_retry_time = NULL WHERE id = ?"#,
             params![last_updated_ts, feed_id],
         )?;
-        
+
         // 提交事务
         tx.commit()?;
-        
+
         Ok(())
     }
-    
+
     /// 更新RSS源的更新失败状态，并计算下次重试时间
     pub fn update_feed_failure(&mut self, feed_id: i64, error_message: &str) -> Result<()> {
         // 获取当前尝试次数
@@ -774,23 +805,23 @@ impl DbManager {
             params![feed_id],
             |row| row.get(0),
         )?;
-        
+
         // 计算下次重试时间：使用指数退避策略
         let retry_delay_seconds = 2_u64.pow(current_attempts as u32) * 60;
         let next_retry_time = Utc::now() + chrono::Duration::seconds(retry_delay_seconds as i64);
         let next_retry_time_ts = next_retry_time.timestamp();
-        
+
         // 开始事务
         let tx = self.conn.transaction()?;
-        
+
         tx.execute(
             r#"UPDATE feeds SET last_update_status = ?, update_attempts = update_attempts + 1, next_retry_time = ? WHERE id = ?"#,
             params![error_message, next_retry_time_ts, feed_id],
         )?;
-        
+
         // 提交事务
         tx.commit()?;
-        
+
         Ok(())
     }
 
@@ -798,30 +829,33 @@ impl DbManager {
     pub fn add_group(&mut self, group: &FeedGroup) -> Result<i64> {
         // 开始事务
         let tx = self.conn.transaction()?;
-        
+
         let id = tx.query_row(
             r#"INSERT INTO feed_groups (name, order_index) VALUES (?, ?) RETURNING id"#,
             params![group.name.as_str(), group.order_index],
-            |row| row.get(0)
+            |row| row.get(0),
         )?;
-        
+
         // 提交事务
         tx.commit()?;
-        
+
         Ok(id)
     }
 
     /// 获取所有分组
     pub fn get_all_groups(&self) -> Result<Vec<FeedGroup>> {
-        let mut stmt = self.conn.prepare("SELECT id, name, order_index FROM feed_groups ORDER BY order_index")?;
-        let groups = stmt.query_map([], |row| {
-            Ok(FeedGroup {
-                id: row.get::<_, i64>(0)?,
-                name: row.get(1)?,
-                order_index: row.get(2)?,
-            })
-        })?
-        .collect::<Result<Vec<_>>>()?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name, order_index FROM feed_groups ORDER BY order_index")?;
+        let groups = stmt
+            .query_map([], |row| {
+                Ok(FeedGroup {
+                    id: row.get::<_, i64>(0)?,
+                    name: row.get(1)?,
+                    order_index: row.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>>>()?;
         Ok(groups)
     }
 
@@ -829,15 +863,15 @@ impl DbManager {
     pub fn update_group(&mut self, group: &FeedGroup) -> Result<()> {
         // 开始事务
         let tx = self.conn.transaction()?;
-        
+
         tx.execute(
             r#"UPDATE feed_groups SET name = ?, order_index = ? WHERE id = ?"#,
             params![group.name.as_str(), group.order_index, group.id],
         )?;
-        
+
         // 提交事务
         tx.commit()?;
-        
+
         Ok(())
     }
 
@@ -845,47 +879,47 @@ impl DbManager {
     pub fn delete_group(&mut self, group_id: i64) -> Result<()> {
         // 开始事务
         let tx = self.conn.transaction()?;
-        
+
         // 首先将属于该分组的RSS源的group_id设为NULL
         tx.execute(
             "UPDATE feeds SET group_id = NULL WHERE group_id = ?",
             params![group_id],
         )?;
-        
+
         // 然后删除分组
-        tx.execute(
-            "DELETE FROM feed_groups WHERE id = ?",
-            params![group_id],
-        )?;
-        
+        tx.execute("DELETE FROM feed_groups WHERE id = ?", params![group_id])?;
+
         // 提交事务
         tx.commit()?;
-        
+
         Ok(())
     }
 
     /// 获取特定分组的RSS源
     pub fn get_feeds_by_group(&self, group_id: i64) -> Result<Vec<Feed>> {
         let mut stmt = self.conn.prepare("SELECT id, name, url, group_id, last_updated, translate_enabled, notification_enabled, last_update_status, update_attempts, next_retry_time FROM feeds WHERE group_id = ? ORDER BY name")?;
-        let feeds = stmt.query_map(params![group_id], |row| {
-            let last_updated = row.get::<_, Option<i64>>(4)?
-                .map(|ts| Utc.timestamp_opt(ts, 0).unwrap());
-            let next_retry_time = row.get::<_, Option<i64>>(9)?
-                .map(|ts| Utc.timestamp_opt(ts, 0).unwrap());
-            Ok(Feed {
-                id: row.get::<_, i64>(0)?,
-                name: row.get(1)?,
-                url: row.get(2)?,
-                group_id: row.get::<_, Option<i64>>(3)?,
-                last_updated,
-                translate_enabled: row.get(5)?,
-                notification_enabled: row.get(6)?,
-                last_update_status: row.get(7)?,
-                update_attempts: row.get(8)?,
-                next_retry_time,
-            })
-        })?
-        .collect::<Result<Vec<_>>>()?;
+        let feeds = stmt
+            .query_map(params![group_id], |row| {
+                let last_updated = row
+                    .get::<_, Option<i64>>(4)?
+                    .map(|ts| Utc.timestamp_opt(ts, 0).unwrap());
+                let next_retry_time = row
+                    .get::<_, Option<i64>>(9)?
+                    .map(|ts| Utc.timestamp_opt(ts, 0).unwrap());
+                Ok(Feed {
+                    id: row.get::<_, i64>(0)?,
+                    name: row.get(1)?,
+                    url: row.get(2)?,
+                    group_id: row.get::<_, Option<i64>>(3)?,
+                    last_updated,
+                    translate_enabled: row.get(5)?,
+                    notification_enabled: row.get(6)?,
+                    last_update_status: row.get(7)?,
+                    update_attempts: row.get(8)?,
+                    next_retry_time,
+                })
+            })?
+            .collect::<Result<Vec<_>>>()?;
         Ok(feeds)
     }
 
@@ -893,9 +927,11 @@ impl DbManager {
     pub fn get_feed_by_id(&self, feed_id: i64) -> Result<Feed> {
         let mut stmt = self.conn.prepare("SELECT id, name, url, group_id, last_updated, translate_enabled, notification_enabled, last_update_status, update_attempts, next_retry_time FROM feeds WHERE id = ?")?;
         let feed = stmt.query_row(params![feed_id], |row| {
-            let last_updated = row.get::<_, Option<i64>>(4)?
+            let last_updated = row
+                .get::<_, Option<i64>>(4)?
                 .map(|ts| Utc.timestamp_opt(ts, 0).unwrap());
-            let next_retry_time = row.get::<_, Option<i64>>(9)?
+            let next_retry_time = row
+                .get::<_, Option<i64>>(9)?
                 .map(|ts| Utc.timestamp_opt(ts, 0).unwrap());
             Ok(Feed {
                 id: row.get::<_, i64>(0)?,
@@ -914,62 +950,75 @@ impl DbManager {
     }
 
     /// 获取特定RSS源的文章
-    pub fn get_articles_by_feed(&self, feed_id: i64, limit: u32, offset: u32) -> Result<Vec<Article>> {
+    pub fn get_articles_by_feed(
+        &self,
+        feed_id: i64,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<Article>> {
         let mut stmt = self.conn.prepare("SELECT id, feed_id, title, content, pub_date, link, is_read, is_favorite, thumbnail, author, categories, translated_title, translated_content FROM articles WHERE feed_id = ? ORDER BY pub_date DESC LIMIT ? OFFSET ?")?;
-        let articles = stmt.query_map(params![feed_id, limit, offset], |row| {
-            let pub_date = Utc.timestamp_opt(row.get::<_, i64>(4)?, 0).single().unwrap_or(Utc::now());
-            let categories_str: Option<String> = row.get(10)?;
-            let categories: Vec<String> = categories_str
-                .as_deref()
-                .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or_else(Vec::new);
-            Ok(Article {
-                id: row.get::<_, i64>(0)?,
-                feed_id: row.get::<_, i64>(1)?,
-                title: row.get(2)?,
-                content: row.get(3)?,
-                pub_date,
-                link: row.get(5)?,
-                is_read: row.get(6)?,
-                is_favorite: row.get(7)?,
-                thumbnail: row.get(8)?,
-                author: row.get(9)?,
-                categories,
-                translated_title: row.get(11)?,
-                translated_content: row.get(12)?,
-            })
-        })?
-        .collect::<Result<Vec<_>>>()?;
+        let articles = stmt
+            .query_map(params![feed_id, limit, offset], |row| {
+                let pub_date = Utc
+                    .timestamp_opt(row.get::<_, i64>(4)?, 0)
+                    .single()
+                    .unwrap_or(Utc::now());
+                let categories_str: Option<String> = row.get(10)?;
+                let categories: Vec<String> = categories_str
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_else(Vec::new);
+                Ok(Article {
+                    id: row.get::<_, i64>(0)?,
+                    feed_id: row.get::<_, i64>(1)?,
+                    title: row.get(2)?,
+                    content: row.get(3)?,
+                    pub_date,
+                    link: row.get(5)?,
+                    is_read: row.get(6)?,
+                    is_favorite: row.get(7)?,
+                    thumbnail: row.get(8)?,
+                    author: row.get(9)?,
+                    categories,
+                    translated_title: row.get(11)?,
+                    translated_content: row.get(12)?,
+                })
+            })?
+            .collect::<Result<Vec<_>>>()?;
         Ok(articles)
     }
 
     /// 获取所有文章
     pub fn get_all_articles(&self, limit: u32, offset: u32) -> Result<Vec<Article>> {
         let mut stmt = self.conn.prepare("SELECT id, feed_id, title, content, pub_date, link, is_read, is_favorite, thumbnail, author, categories, translated_title, translated_content FROM articles ORDER BY pub_date DESC LIMIT ? OFFSET ?")?;
-        let articles = stmt.query_map(params![limit, offset], |row| {
-            let pub_date = Utc.timestamp_opt(row.get::<_, i64>(4)?, 0).single().unwrap_or(Utc::now());
-            let categories_str: Option<String> = row.get(10)?;
-            let categories: Vec<String> = categories_str
-                .as_deref()
-                .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or_else(Vec::new);
-            Ok(Article {
-                id: row.get::<_, i64>(0)?,
-                feed_id: row.get::<_, i64>(1)?,
-                title: row.get(2)?,
-                content: row.get(3)?,
-                pub_date,
-                link: row.get(5)?,
-                is_read: row.get(6)?,
-                is_favorite: row.get(7)?,
-                thumbnail: row.get(8)?,
-                author: row.get(9)?,
-                categories,
-                translated_title: row.get(11)?,
-                translated_content: row.get(12)?,
-            })
-        })?
-        .collect::<Result<Vec<_>>>()?;
+        let articles = stmt
+            .query_map(params![limit, offset], |row| {
+                let pub_date = Utc
+                    .timestamp_opt(row.get::<_, i64>(4)?, 0)
+                    .single()
+                    .unwrap_or(Utc::now());
+                let categories_str: Option<String> = row.get(10)?;
+                let categories: Vec<String> = categories_str
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_else(Vec::new);
+                Ok(Article {
+                    id: row.get::<_, i64>(0)?,
+                    feed_id: row.get::<_, i64>(1)?,
+                    title: row.get(2)?,
+                    content: row.get(3)?,
+                    pub_date,
+                    link: row.get(5)?,
+                    is_read: row.get(6)?,
+                    is_favorite: row.get(7)?,
+                    thumbnail: row.get(8)?,
+                    author: row.get(9)?,
+                    categories,
+                    translated_title: row.get(11)?,
+                    translated_content: row.get(12)?,
+                })
+            })?
+            .collect::<Result<Vec<_>>>()?;
         Ok(articles)
     }
 
@@ -985,120 +1034,146 @@ impl DbManager {
     /// 获取收藏的文章
     pub fn get_favorite_articles(&self, limit: u32, offset: u32) -> Result<Vec<Article>> {
         let mut stmt = self.conn.prepare("SELECT id, feed_id, title, content, pub_date, link, is_read, is_favorite, thumbnail, author, categories, translated_title, translated_content FROM articles WHERE is_favorite = TRUE ORDER BY pub_date DESC LIMIT ? OFFSET ?")?;
-        let articles = stmt.query_map(params![limit, offset], |row| {
-            let pub_date = Utc.timestamp_opt(row.get::<_, i64>(4)?, 0).single().unwrap_or(Utc::now());
-            let categories_str: Option<String> = row.get(10)?;
-            let categories: Vec<String> = categories_str
-                .as_deref()
-                .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or_else(Vec::new);
-            Ok(Article {
-                id: row.get::<_, i64>(0)?,
-                feed_id: row.get::<_, i64>(1)?,
-                title: row.get(2)?,
-                content: row.get(3)?,
-                pub_date,
-                link: row.get(5)?,
-                is_read: row.get(6)?,
-                is_favorite: row.get(7)?,
-                thumbnail: row.get(8)?,
-                author: row.get(9)?,
-                categories,
-                translated_title: row.get(11)?,
-                translated_content: row.get(12)?,
-            })
-        })?
-        .collect::<Result<Vec<_>>>()?;
+        let articles = stmt
+            .query_map(params![limit, offset], |row| {
+                let pub_date = Utc
+                    .timestamp_opt(row.get::<_, i64>(4)?, 0)
+                    .single()
+                    .unwrap_or(Utc::now());
+                let categories_str: Option<String> = row.get(10)?;
+                let categories: Vec<String> = categories_str
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_else(Vec::new);
+                Ok(Article {
+                    id: row.get::<_, i64>(0)?,
+                    feed_id: row.get::<_, i64>(1)?,
+                    title: row.get(2)?,
+                    content: row.get(3)?,
+                    pub_date,
+                    link: row.get(5)?,
+                    is_read: row.get(6)?,
+                    is_favorite: row.get(7)?,
+                    thumbnail: row.get(8)?,
+                    author: row.get(9)?,
+                    categories,
+                    translated_title: row.get(11)?,
+                    translated_content: row.get(12)?,
+                })
+            })?
+            .collect::<Result<Vec<_>>>()?;
         Ok(articles)
     }
 
     /// 获取未读文章
     pub fn get_unread_articles(&self, limit: u32, offset: u32) -> Result<Vec<Article>> {
         let mut stmt = self.conn.prepare("SELECT id, feed_id, title, content, pub_date, link, is_read, is_favorite, thumbnail, author, categories, translated_title, translated_content FROM articles WHERE is_read = FALSE ORDER BY pub_date DESC LIMIT ? OFFSET ?")?;
-        let articles = stmt.query_map(params![limit, offset], |row| {
-            let pub_date = Utc.timestamp_opt(row.get::<_, i64>(4)?, 0).single().unwrap_or(Utc::now());
-            let categories_str: Option<String> = row.get(10)?;
-            let categories: Vec<String> = categories_str
-                .as_deref()
-                .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or_else(Vec::new);
-            Ok(Article {
-                id: row.get::<_, i64>(0)?,
-                feed_id: row.get::<_, i64>(1)?,
-                title: row.get(2)?,
-                content: row.get(3)?,
-                pub_date,
-                link: row.get(5)?,
-                is_read: row.get(6)?,
-                is_favorite: row.get(7)?,
-                thumbnail: row.get(8)?,
-                author: row.get(9)?,
-                categories,
-                translated_title: row.get(11)?,
-                translated_content: row.get(12)?,
-            })
-        })?
-        .collect::<Result<Vec<_>>>()?;
+        let articles = stmt
+            .query_map(params![limit, offset], |row| {
+                let pub_date = Utc
+                    .timestamp_opt(row.get::<_, i64>(4)?, 0)
+                    .single()
+                    .unwrap_or(Utc::now());
+                let categories_str: Option<String> = row.get(10)?;
+                let categories: Vec<String> = categories_str
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_else(Vec::new);
+                Ok(Article {
+                    id: row.get::<_, i64>(0)?,
+                    feed_id: row.get::<_, i64>(1)?,
+                    title: row.get(2)?,
+                    content: row.get(3)?,
+                    pub_date,
+                    link: row.get(5)?,
+                    is_read: row.get(6)?,
+                    is_favorite: row.get(7)?,
+                    thumbnail: row.get(8)?,
+                    author: row.get(9)?,
+                    categories,
+                    translated_title: row.get(11)?,
+                    translated_content: row.get(12)?,
+                })
+            })?
+            .collect::<Result<Vec<_>>>()?;
         Ok(articles)
     }
 
     /// 根据feed_id获取未读文章
-    pub fn get_unread_articles_by_feed(&self, feed_id: i64, limit: u32, offset: u32) -> Result<Vec<Article>> {
+    pub fn get_unread_articles_by_feed(
+        &self,
+        feed_id: i64,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<Article>> {
         let mut stmt = self.conn.prepare("SELECT id, feed_id, title, content, pub_date, link, is_read, is_favorite, thumbnail, author, categories, translated_title, translated_content FROM articles WHERE feed_id = ? AND is_read = FALSE ORDER BY pub_date DESC LIMIT ? OFFSET ?")?;
-        let articles = stmt.query_map(params![feed_id, limit, offset], |row| {
-            let pub_date = Utc.timestamp_opt(row.get::<_, i64>(4)?, 0).single().unwrap_or(Utc::now());
-            let categories_str: Option<String> = row.get(10)?;
-            let categories: Vec<String> = categories_str
-                .as_deref()
-                .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or_else(Vec::new);
-            Ok(Article {
-                id: row.get::<_, i64>(0)?,
-                feed_id: row.get::<_, i64>(1)?,
-                title: row.get(2)?,
-                content: row.get(3)?,
-                pub_date,
-                link: row.get(5)?,
-                is_read: row.get(6)?,
-                is_favorite: row.get(7)?,
-                thumbnail: row.get(8)?,
-                author: row.get(9)?,
-                categories,
-                translated_title: row.get(11)?,
-                translated_content: row.get(12)?,
-            })
-        })?
-        .collect::<Result<Vec<_>>>()?;
+        let articles = stmt
+            .query_map(params![feed_id, limit, offset], |row| {
+                let pub_date = Utc
+                    .timestamp_opt(row.get::<_, i64>(4)?, 0)
+                    .single()
+                    .unwrap_or(Utc::now());
+                let categories_str: Option<String> = row.get(10)?;
+                let categories: Vec<String> = categories_str
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_else(Vec::new);
+                Ok(Article {
+                    id: row.get::<_, i64>(0)?,
+                    feed_id: row.get::<_, i64>(1)?,
+                    title: row.get(2)?,
+                    content: row.get(3)?,
+                    pub_date,
+                    link: row.get(5)?,
+                    is_read: row.get(6)?,
+                    is_favorite: row.get(7)?,
+                    thumbnail: row.get(8)?,
+                    author: row.get(9)?,
+                    categories,
+                    translated_title: row.get(11)?,
+                    translated_content: row.get(12)?,
+                })
+            })?
+            .collect::<Result<Vec<_>>>()?;
         Ok(articles)
     }
 
     /// 根据feed_id获取收藏文章
-    pub fn get_favorite_articles_by_feed(&self, feed_id: i64, limit: u32, offset: u32) -> Result<Vec<Article>> {
+    pub fn get_favorite_articles_by_feed(
+        &self,
+        feed_id: i64,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<Article>> {
         let mut stmt = self.conn.prepare("SELECT id, feed_id, title, content, pub_date, link, is_read, is_favorite, thumbnail, author, categories, translated_title, translated_content FROM articles WHERE feed_id = ? AND is_favorite = TRUE ORDER BY pub_date DESC LIMIT ? OFFSET ?")?;
-        let articles = stmt.query_map(params![feed_id, limit, offset], |row| {
-            let pub_date = Utc.timestamp_opt(row.get::<_, i64>(4)?, 0).single().unwrap_or(Utc::now());
-            let categories_str: Option<String> = row.get(10)?;
-            let categories: Vec<String> = categories_str
-                .as_deref()
-                .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or_else(Vec::new);
-            Ok(Article {
-                id: row.get::<_, i64>(0)?,
-                feed_id: row.get::<_, i64>(1)?,
-                title: row.get(2)?,
-                content: row.get(3)?,
-                pub_date,
-                link: row.get(5)?,
-                is_read: row.get(6)?,
-                is_favorite: row.get(7)?,
-                thumbnail: row.get(8)?,
-                author: row.get(9)?,
-                categories,
-                translated_title: row.get(11)?,
-                translated_content: row.get(12)?,
-            })
-        })?
-        .collect::<Result<Vec<_>>>()?;
+        let articles = stmt
+            .query_map(params![feed_id, limit, offset], |row| {
+                let pub_date = Utc
+                    .timestamp_opt(row.get::<_, i64>(4)?, 0)
+                    .single()
+                    .unwrap_or(Utc::now());
+                let categories_str: Option<String> = row.get(10)?;
+                let categories: Vec<String> = categories_str
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_else(Vec::new);
+                Ok(Article {
+                    id: row.get::<_, i64>(0)?,
+                    feed_id: row.get::<_, i64>(1)?,
+                    title: row.get(2)?,
+                    content: row.get(3)?,
+                    pub_date,
+                    link: row.get(5)?,
+                    is_read: row.get(6)?,
+                    is_favorite: row.get(7)?,
+                    thumbnail: row.get(8)?,
+                    author: row.get(9)?,
+                    categories,
+                    translated_title: row.get(11)?,
+                    translated_content: row.get(12)?,
+                })
+            })?
+            .collect::<Result<Vec<_>>>()?;
         Ok(articles)
     }
 
@@ -1108,54 +1183,45 @@ impl DbManager {
     pub fn delete_articles(&mut self, feed_id: Option<i64>) -> Result<()> {
         // 开始事务
         let tx = self.conn.transaction()?;
-        
+
         match feed_id {
             Some(id) => {
                 // 删除特定源的所有文章
-                tx.execute(
-                    "DELETE FROM articles WHERE feed_id = ?",
-                    params![id],
-                )?;
-            },
+                tx.execute("DELETE FROM articles WHERE feed_id = ?", params![id])?;
+            }
             None => {
                 // 删除所有文章
-                tx.execute(
-                    "DELETE FROM articles",
-                    [],
-                )?;
+                tx.execute("DELETE FROM articles", [])?;
             }
         }
-        
+
         // 提交事务
         tx.commit()?;
-        
+
         Ok(())
     }
-    
+
     /// 删除单篇文章
     pub fn delete_article(&mut self, article_id: i64) -> Result<()> {
         // 开始事务
         let tx = self.conn.transaction()?;
-        
+
         // 删除特定文章
-        tx.execute(
-            "DELETE FROM articles WHERE id = ?",
-            params![article_id],
-        )?;
-        
+        tx.execute("DELETE FROM articles WHERE id = ?", params![article_id])?;
+
         // 提交事务
         tx.commit()?;
-        
+
         Ok(())
     }
-    
+
     /// 标记所有文章为已读
     /// 如果提供feed_id，则标记该源的所有文章为已读
     /// 如果不提供feed_id，则标记所有文章为已读
     pub fn mark_all_articles_as_read(&mut self, feed_id: Option<i64>) -> Result<()> {
         // 开始事务
         let tx = self.conn.transaction()?;
-        
+
         match feed_id {
             Some(id) => {
                 // 标记特定源的所有文章为已读
@@ -1163,19 +1229,16 @@ impl DbManager {
                     "UPDATE articles SET is_read = TRUE WHERE feed_id = ?",
                     params![id],
                 )?;
-            },
+            }
             None => {
                 // 标记所有文章为已读
-                tx.execute(
-                    "UPDATE articles SET is_read = TRUE",
-                    [],
-                )?;
+                tx.execute("UPDATE articles SET is_read = TRUE", [])?;
             }
         }
-        
+
         // 提交事务
         tx.commit()?;
-        
+
         Ok(())
     }
 
@@ -1184,19 +1247,22 @@ impl DbManager {
         // 获取所有分组和RSS源
         let groups = self.get_all_groups()?;
         let feeds = self.get_all_feeds()?;
-        
+
         // 按分组组织RSS源
         let mut group_feeds = std::collections::HashMap::new();
         let mut ungrouped_feeds = Vec::new();
-        
+
         for feed in feeds {
             if let Some(group_id) = feed.group_id {
-                group_feeds.entry(group_id).or_insert_with(Vec::new).push(feed);
+                group_feeds
+                    .entry(group_id)
+                    .or_insert_with(Vec::new)
+                    .push(feed);
             } else {
                 ungrouped_feeds.push(feed);
             }
         }
-        
+
         // 创建OPML对象
         let mut opml = OPML {
             version: "2.0".to_string(),
@@ -1204,11 +1270,9 @@ impl DbManager {
                 title: Some("RSS Reader Subscriptions".to_string()),
                 ..Default::default()
             }),
-            body: opml::Body {
-                outlines: vec![]
-            },
+            body: opml::Body { outlines: vec![] },
         };
-        
+
         // 添加未分组的RSS源
         for feed in ungrouped_feeds {
             let outline = Outline {
@@ -1219,7 +1283,7 @@ impl DbManager {
             };
             opml.body.outlines.push(outline);
         }
-        
+
         // 添加分组的RSS源
         for group in groups {
             let mut group_outline = Outline {
@@ -1228,7 +1292,7 @@ impl DbManager {
                 outlines: vec![],
                 ..Default::default()
             };
-            
+
             if let Some(feeds) = group_feeds.get(&group.id) {
                 for feed in feeds {
                     let feed_outline = Outline {
@@ -1240,14 +1304,13 @@ impl DbManager {
                     group_outline.outlines.push(feed_outline);
                 }
             }
-            
+
             opml.body.outlines.push(group_outline);
         }
-        
+
         // 生成OPML XML字符串
-        opml.to_string().map_err(|e| {
-            rusqlite::Error::ToSqlConversionFailure(Box::new(e))
-        })
+        opml.to_string()
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
     }
 
     /// 导入OPML文件
@@ -1256,26 +1319,30 @@ impl DbManager {
         let opml = OPML::from_str(opml_content).map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, Box::new(e))
         })?;
-        
+
         let mut imported_count = 0;
-        
+
         // 处理所有outline
         for outline in opml.body.outlines {
             imported_count += self.process_outline(&outline, None)?;
         }
-        
+
         Ok(imported_count)
     }
 
     /// 递归处理OPML outline
-    fn process_outline(&mut self, outline: &Outline, parent_group_id: Option<i64>) -> Result<usize> {
+    fn process_outline(
+        &mut self,
+        outline: &Outline,
+        parent_group_id: Option<i64>,
+    ) -> Result<usize> {
         let mut imported_count = 0;
-        
+
         // 如果是分组（没有xml_url，但有子outline）
         if outline.xml_url.is_none() && !outline.outlines.is_empty() {
             // 创建或获取分组
             let group_id = self.get_or_create_group(&outline.text)?;
-            
+
             // 处理子outline
             for child_outline in &outline.outlines {
                 imported_count += self.process_outline(child_outline, Some(group_id))?;
@@ -1283,14 +1350,14 @@ impl DbManager {
         } else if let Some(xml_url) = &outline.xml_url {
             // 是RSS源
             let feed_name = outline.title.as_deref().unwrap_or(&outline.text);
-            
+
             // 检查是否已存在该RSS源
             let existing_feed = self.conn.query_row(
                 "SELECT id FROM feeds WHERE url = ?",
                 params![xml_url],
-                |row| row.get::<usize, i64>(0)
+                |row| row.get::<usize, i64>(0),
             );
-            
+
             if existing_feed.is_err() {
                 // 不存在，创建新的RSS源
                 let feed = Feed {
@@ -1305,12 +1372,12 @@ impl DbManager {
                     update_attempts: 0,
                     next_retry_time: None,
                 };
-                
+
                 self.add_feed(&feed)?;
                 imported_count += 1;
             }
         }
-        
+
         Ok(imported_count)
     }
 
@@ -1320,9 +1387,9 @@ impl DbManager {
         let existing_group = self.conn.query_row(
             "SELECT id FROM feed_groups WHERE name = ?",
             params![group_name],
-            |row| row.get(0)
+            |row| row.get(0),
         );
-        
+
         if let Ok(group_id) = existing_group {
             Ok(group_id)
         } else {
@@ -1332,7 +1399,7 @@ impl DbManager {
                 name: group_name.to_string(),
                 order_index: 0, // 默认顺序
             };
-            
+
             self.add_group(&group)
         }
     }
@@ -1341,15 +1408,12 @@ impl DbManager {
     pub fn add_ai_platform(&mut self, platform: &AIPlatform) -> Result<i64> {
         // 开始事务
         let tx = self.conn.transaction()?;
-        
+
         // 如果设置为默认平台，先将其他平台的默认标志设为false
         if platform.is_default {
-            tx.execute(
-                "UPDATE ai_platforms SET is_default = FALSE",
-                [],
-            )?;
+            tx.execute("UPDATE ai_platforms SET is_default = FALSE", [])?;
         }
-        
+
         let id = tx.query_row(
             r#"INSERT INTO ai_platforms (name, api_url, api_key, api_model, is_default) 
                VALUES (?, ?, ?, ?, ?) RETURNING id"#,
@@ -1360,12 +1424,12 @@ impl DbManager {
                 platform.api_model.as_str(),
                 platform.is_default
             ],
-            |row| row.get(0)
+            |row| row.get(0),
         )?;
-        
+
         // 提交事务
         tx.commit()?;
-        
+
         Ok(id)
     }
 
@@ -1373,19 +1437,20 @@ impl DbManager {
     pub fn get_all_ai_platforms(&self) -> Result<Vec<AIPlatform>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, api_url, api_key, api_model, is_default 
-             FROM ai_platforms ORDER BY name"
+             FROM ai_platforms ORDER BY name",
         )?;
-        let platforms = stmt.query_map([], |row| {
-            Ok(AIPlatform {
-                id: row.get::<_, i64>(0)?,
-                name: row.get(1)?,
-                api_url: row.get(2)?,
-                api_key: row.get(3)?,
-                api_model: row.get(4)?,
-                is_default: row.get(5)?,
-            })
-        })?
-        .collect::<Result<Vec<_>>>()?;
+        let platforms = stmt
+            .query_map([], |row| {
+                Ok(AIPlatform {
+                    id: row.get::<_, i64>(0)?,
+                    name: row.get(1)?,
+                    api_url: row.get(2)?,
+                    api_key: row.get(3)?,
+                    api_model: row.get(4)?,
+                    is_default: row.get(5)?,
+                })
+            })?
+            .collect::<Result<Vec<_>>>()?;
         Ok(platforms)
     }
 
@@ -1395,16 +1460,16 @@ impl DbManager {
     pub fn add_blacklist_keyword(&mut self, keyword: &str) -> Result<i64> {
         // 开始事务
         let tx = self.conn.transaction()?;
-        
+
         let id = tx.query_row(
             r#"INSERT INTO blacklist (keyword) VALUES (?) RETURNING id"#,
             params![keyword],
-            |row| row.get(0)
+            |row| row.get(0),
         )?;
-        
+
         // 提交事务
         tx.commit()?;
-        
+
         Ok(id)
     }
 
@@ -1412,26 +1477,24 @@ impl DbManager {
     pub fn delete_blacklist_keyword(&mut self, keyword: &str) -> Result<()> {
         // 开始事务
         let tx = self.conn.transaction()?;
-        
-        tx.execute(
-            "DELETE FROM blacklist WHERE keyword = ?",
-            params![keyword],
-        )?;
-        
+
+        tx.execute("DELETE FROM blacklist WHERE keyword = ?", params![keyword])?;
+
         // 提交事务
         tx.commit()?;
-        
+
         Ok(())
     }
 
     /// 获取所有黑名单关键字
     pub fn get_all_blacklist_keywords(&self) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare("SELECT keyword FROM blacklist ORDER BY keyword")?;
-        let keywords = stmt.query_map([], |row| {
-            Ok(row.get(0)?) 
-        })?
-        .collect::<Result<Vec<_>>>()?;
-        
+        let mut stmt = self
+            .conn
+            .prepare("SELECT keyword FROM blacklist ORDER BY keyword")?;
+        let keywords = stmt
+            .query_map([], |row| Ok(row.get(0)?))?
+            .collect::<Result<Vec<_>>>()?;
+
         Ok(keywords)
     }
 
@@ -1442,7 +1505,7 @@ impl DbManager {
     pub fn get_default_ai_platform(&self) -> Result<Option<AIPlatform>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, api_url, api_key, api_model, is_default 
-             FROM ai_platforms WHERE is_default = TRUE"
+             FROM ai_platforms WHERE is_default = TRUE",
         )?;
         let platform = stmt.query_row([], |row| {
             Ok(AIPlatform {
@@ -1454,19 +1517,19 @@ impl DbManager {
                 is_default: row.get(5)?,
             })
         });
-        
+
         match platform {
             Ok(platform) => Ok(Some(platform)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e),
         }
     }
-    
+
     /// 根据ID获取AI平台
     pub fn get_ai_platform_by_id(&self, id: i64) -> Result<Option<AIPlatform>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, api_url, api_key, api_model, is_default 
-             FROM ai_platforms WHERE id = ?"
+             FROM ai_platforms WHERE id = ?",
         )?;
         let platform = stmt.query_row(params![id], |row| {
             Ok(AIPlatform {
@@ -1478,7 +1541,7 @@ impl DbManager {
                 is_default: row.get(5)?,
             })
         });
-        
+
         match platform {
             Ok(platform) => Ok(Some(platform)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -1490,15 +1553,12 @@ impl DbManager {
     pub fn update_ai_platform(&mut self, platform: &AIPlatform) -> Result<()> {
         // 开始事务
         let tx = self.conn.transaction()?;
-        
+
         // 如果设置为默认平台，先将其他平台的默认标志设为false
         if platform.is_default {
-            tx.execute(
-                "UPDATE ai_platforms SET is_default = FALSE",
-                [],
-            )?;
+            tx.execute("UPDATE ai_platforms SET is_default = FALSE", [])?;
         }
-        
+
         tx.execute(
             r#"UPDATE ai_platforms SET name = ?, api_url = ?, api_key = ?, api_model = ?, is_default = ? 
                WHERE id = ?"#,
@@ -1511,10 +1571,10 @@ impl DbManager {
                 platform.id
             ],
         )?;
-        
+
         // 提交事务
         tx.commit()?;
-        
+
         Ok(())
     }
 
@@ -1522,40 +1582,35 @@ impl DbManager {
     pub fn delete_ai_platform(&mut self, platform_id: i64) -> Result<()> {
         // 开始事务
         let tx = self.conn.transaction()?;
-        
+
         tx.execute(
             "DELETE FROM ai_platforms WHERE id = ?",
             params![platform_id],
         )?;
-        
+
         // 提交事务
         tx.commit()?;
-        
+
         Ok(())
     }
 
     /// 设置默认AI平台
     pub fn set_default_ai_platform(&mut self, platform_id: i64) -> Result<()> {
-      
-        
         // 开始事务
         let tx = self.conn.transaction()?;
-        
+
         // 先将所有平台的默认标志设为false
-        tx.execute(
-            "UPDATE ai_platforms SET is_default = FALSE",
-            [],
-        )?;
-        
+        tx.execute("UPDATE ai_platforms SET is_default = FALSE", [])?;
+
         // 设置指定平台为默认
         tx.execute(
             "UPDATE ai_platforms SET is_default = TRUE WHERE id = ?",
             params![platform_id],
         )?;
-        
+
         // 提交事务
         tx.commit()?;
-        
+
         Ok(())
     }
 }

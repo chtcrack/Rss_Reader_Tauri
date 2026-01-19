@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-
 /// AI翻译配置
 #[derive(Debug, Clone)]
 pub struct TranslatorConfig {
@@ -101,9 +100,7 @@ pub struct ChatStreamDelta {
 
 /// 安全截取字符串，确保不会在字符中间截断
 fn safe_truncate(s: &str, max_len: usize) -> String {
-    s.chars()
-        .take(max_len)
-        .collect()
+    s.chars().take(max_len).collect()
 }
 
 /// AI翻译器结构体
@@ -119,7 +116,12 @@ impl AITranslator {
     pub fn new(config: Option<TranslatorConfig>) -> Self {
         Self {
             client: Client::builder()
-                .timeout(std::time::Duration::from_secs(config.as_ref().unwrap_or(&TranslatorConfig::default()).timeout))
+                .timeout(std::time::Duration::from_secs(
+                    config
+                        .as_ref()
+                        .unwrap_or(&TranslatorConfig::default())
+                        .timeout,
+                ))
                 .build()
                 .unwrap(),
             config: config.unwrap_or_default(),
@@ -146,10 +148,14 @@ impl AITranslator {
         source_language: Option<&str>,
     ) -> Result<String, Box<dyn std::error::Error>> {
         eprintln!("[AI] ===== 开始翻译文本 =====");
-        eprintln!("[AI] 文本长度: {}, 首50字符: {}...", text.len(), text.chars().take(50).collect::<String>());
+        eprintln!(
+            "[AI] 文本长度: {}, 首50字符: {}...",
+            text.len(),
+            text.chars().take(50).collect::<String>()
+        );
         eprintln!("[AI] 目标语言: {}", target_language);
         eprintln!("[AI] 源语言: {:?}", source_language);
-        
+
         // 获取默认AI平台
         eprintln!("[AI] 开始获取默认AI平台...");
         let platform = self.get_default_platform().clone();
@@ -166,15 +172,24 @@ impl AITranslator {
         let prompt = match source_language {
             Some(src) => {
                 eprintln!("[AI] 使用指定源语言: {}", src);
-                format!("Translate the following text from {} to {}: {}", src, target_language, text)
-            },
+                format!(
+                    "Translate the following text from {} to {}: {}",
+                    src, target_language, text
+                )
+            }
             None => {
                 eprintln!("[AI] 使用自动检测源语言");
-                format!("Translate the following text to {}: {}", target_language, text)
+                format!(
+                    "Translate the following text to {}: {}",
+                    target_language, text
+                )
             }
         };
         eprintln!("[AI] 提示词长度: {}", prompt.len());
-        eprintln!("[AI] 提示词前100字符: {}...", prompt.chars().take(100).collect::<String>());
+        eprintln!(
+            "[AI] 提示词前100字符: {}...",
+            prompt.chars().take(100).collect::<String>()
+        );
 
         // 构建聊天请求
         eprintln!("[AI] 开始构建聊天请求...");
@@ -190,12 +205,16 @@ impl AITranslator {
             stream: false,
         };
         eprintln!("[AI] 聊天请求构建完成");
-        eprintln!("[AI] 请求max_tokens: {}, temperature: {}", chat_request.max_tokens, chat_request.temperature);
+        eprintln!(
+            "[AI] 请求max_tokens: {}, temperature: {}",
+            chat_request.max_tokens, chat_request.temperature
+        );
 
         // 发送请求
         eprintln!("[AI] 开始发送请求到API...");
         eprintln!("[AI] API URL: {}", platform.api_url);
-        let response = match self.client
+        let response = match self
+            .client
             .post(&platform.api_url)
             .header("Authorization", format!("Bearer {}", platform.api_key))
             .header("Content-Type", "application/json")
@@ -207,7 +226,7 @@ impl AITranslator {
                 eprintln!("[AI] 成功收到API响应");
                 eprintln!("[AI] 响应状态码: {:?}", resp.status());
                 resp
-            },
+            }
             Err(e) => {
                 eprintln!("[AI] 发送请求失败: {}", e);
                 eprintln!("[AI] 错误详情: {:?}", e);
@@ -222,23 +241,27 @@ impl AITranslator {
                 eprintln!("[AI] 成功读取响应内容，长度: {}", text.len());
                 // 确保只在有效的字符边界处截断字符串
                 let preview_len = std::cmp::min(200, text.len());
-                let truncated_text = text.char_indices().take_while(|&(i, _)| i < preview_len).map(|(_, c)| c).collect::<String>();
+                let truncated_text = text
+                    .char_indices()
+                    .take_while(|&(i, _)| i < preview_len)
+                    .map(|(_, c)| c)
+                    .collect::<String>();
                 eprintln!("[AI] 响应内容前200字符: {}...", truncated_text);
                 text
-            },
+            }
             Err(e) => {
                 eprintln!("[AI] 读取响应内容失败: {}", e);
                 return Err(e.into());
             }
         };
-        
+
         // 解析JSON响应
         eprintln!("[AI] 开始解析JSON响应...");
         let response: serde_json::Value = match serde_json::from_str(&response_text) {
             Ok(json) => {
                 eprintln!("[AI] 成功解析JSON响应");
                 json
-            },
+            }
             Err(e) => {
                 eprintln!("[AI] JSON解析失败: {}", e);
                 eprintln!("[AI] 原始响应内容: {}", response_text);
@@ -266,17 +289,21 @@ impl AITranslator {
                 eprintln!("[AI] 成功提取翻译结果，长度: {}", trimmed_text.len());
                 // 确保只在有效的字符边界处截断字符串
                 let preview_len = std::cmp::min(100, trimmed_text.len());
-                let truncated_text = trimmed_text.char_indices().take_while(|&(i, _)| i < preview_len).map(|(_, c)| c).collect::<String>();
+                let truncated_text = trimmed_text
+                    .char_indices()
+                    .take_while(|&(i, _)| i < preview_len)
+                    .map(|(_, c)| c)
+                    .collect::<String>();
                 eprintln!("[AI] 翻译结果前100字符: {}...", truncated_text);
                 trimmed_text.to_string()
-            },
+            }
             None => {
                 eprintln!("[AI] 提取翻译结果失败");
                 eprintln!("[AI] 响应结构: {:?}", response);
                 return Err("Failed to extract translated text".into());
             }
         };
-        
+
         eprintln!("[AI] ===== 翻译文本完成 =====");
         Ok(translated_text)
     }
@@ -289,12 +316,12 @@ impl AITranslator {
         target_language: &str,
     ) -> Result<(String, String), Box<dyn std::error::Error>> {
         eprintln!("[AI] 开始翻译RSS文章标题和内容...");
-        
+
         // 翻译标题
         eprintln!("[AI] 开始翻译文章标题...");
         let translated_title = self.translate_text(title, target_language, None).await?;
         eprintln!("[AI] 文章标题翻译完成: {}", translated_title);
-        
+
         // 翻译内容，限制内容长度以避免超出API限制
         eprintln!("[AI] 开始翻译文章内容...");
         // 使用字符迭代器来安全地截断内容，避免字节索引问题
@@ -308,7 +335,9 @@ impl AITranslator {
             truncated_content.push(c);
             char_count += 1;
         }
-        let translated_content = self.translate_text(&truncated_content, target_language, None).await?;
+        let translated_content = self
+            .translate_text(&truncated_content, target_language, None)
+            .await?;
         // 安全地获取前100个字符，避免字节索引问题
         let preview = translated_content.chars().take(100).collect::<String>();
         eprintln!("[AI] 文章内容翻译完成: {}...", preview);
@@ -350,7 +379,8 @@ impl AITranslator {
             stream: true,
         };
 
-        let response = self.client
+        let response = self
+            .client
             .post(&platform.api_url)
             .header("Authorization", format!("Bearer {}", platform.api_key))
             .header("Content-Type", "application/json")
@@ -361,28 +391,33 @@ impl AITranslator {
         // 获取响应状态码并保存
         let status = response.status();
         eprintln!("[AI] API响应状态: {:?}", status);
-        
+
         // 检查API响应状态码，如果不是成功状态，读取并输出响应内容
         if !status.is_success() {
             let response_text = response.text().await?;
             eprintln!("[AI] API错误响应: {}", response_text);
-            
+
             // 尝试解析错误响应JSON，提取错误消息
-            let error_message = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&response_text) {
-                // 尝试多种错误消息格式
-                if let Some(msg) = json.get("message").and_then(|m| m.as_str()) {
-                    msg.to_string()
-                } else if let Some(msg) = json.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()) {
-                    msg.to_string()
-                } else if let Some(msg) = json.get("error").and_then(|e| e.as_str()) {
-                    msg.to_string()
+            let error_message =
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&response_text) {
+                    // 尝试多种错误消息格式
+                    if let Some(msg) = json.get("message").and_then(|m| m.as_str()) {
+                        msg.to_string()
+                    } else if let Some(msg) = json
+                        .get("error")
+                        .and_then(|e| e.get("message"))
+                        .and_then(|m| m.as_str())
+                    {
+                        msg.to_string()
+                    } else if let Some(msg) = json.get("error").and_then(|e| e.as_str()) {
+                        msg.to_string()
+                    } else {
+                        response_text.clone()
+                    }
                 } else {
                     response_text.clone()
-                }
-            } else {
-                response_text.clone()
-            };
-            
+                };
+
             return Err(format!("API错误: {}", error_message).into());
         }
 
@@ -390,7 +425,7 @@ impl AITranslator {
         let mut buffer = Vec::new();
         let mut total_received = 0;
         let mut total_sent = 0;
-        
+
         // 设置最大缓冲区大小为10MB，避免内存溢出
         const MAX_BUFFER_SIZE: usize = 10 * 1024 * 1024;
 
@@ -399,13 +434,20 @@ impl AITranslator {
         while let Some(chunk_result) = futures::StreamExt::next(&mut stream).await {
             let chunk = chunk_result?;
             total_received += chunk.len();
-            eprintln!("[AI] 收到数据块: {} 字节, 累计: {}", chunk.len(), total_received);
-            
+            eprintln!(
+                "[AI] 收到数据块: {} 字节, 累计: {}",
+                chunk.len(),
+                total_received
+            );
+
             // 检查缓冲区大小，避免内存溢出
             if buffer.len() + chunk.len() > MAX_BUFFER_SIZE {
-                eprintln!("[AI] 警告: 缓冲区即将超过最大限制，当前大小: {} 字节, 最大限制: {} 字节", 
-                          buffer.len(), MAX_BUFFER_SIZE);
-                
+                eprintln!(
+                    "[AI] 警告: 缓冲区即将超过最大限制，当前大小: {} 字节, 最大限制: {} 字节",
+                    buffer.len(),
+                    MAX_BUFFER_SIZE
+                );
+
                 // 如果缓冲区已满，尝试清理已处理的数据或报错
                 if buffer.len() > MAX_BUFFER_SIZE {
                     eprintln!("[AI] 错误: 缓冲区已超过最大限制，无法继续处理更多数据");
@@ -441,20 +483,31 @@ impl AITranslator {
                         match serde_json::from_str::<serde_json::Value>(json_str) {
                             Ok(json_value) => {
                                 // 使用模式匹配安全地提取choices字段
-                                if let Some(choices) = json_value.get("choices").and_then(|c| c.as_array()) {
+                                if let Some(choices) =
+                                    json_value.get("choices").and_then(|c| c.as_array())
+                                {
                                     for choice in choices {
                                         // 安全地提取delta和content字段
                                         if let Some(delta) = choice.get("delta") {
-                                            if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
+                                            if let Some(content) =
+                                                delta.get("content").and_then(|c| c.as_str())
+                                            {
                                                 match tx.send(content.to_string()).await {
                                                     Ok(_) => {
                                                         total_sent += 1;
                                                         // 添加短暂延迟，避免发送过快导致前端无法响应
-                                                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                                                        tokio::time::sleep(
+                                                            std::time::Duration::from_millis(10),
+                                                        )
+                                                        .await;
                                                     }
                                                     Err(e) => {
                                                         eprintln!("[AI] 发送内容片段失败: {}", e);
-                                                        return Err(format!("Failed to send content: {}", e).into());
+                                                        return Err(format!(
+                                                            "Failed to send content: {}",
+                                                            e
+                                                        )
+                                                        .into());
                                                     }
                                                 }
                                             }
@@ -463,11 +516,15 @@ impl AITranslator {
                                 }
                             }
                             Err(e) => {
-                                eprintln!("[AI] 解析JSON失败: {}, 原始字符串长度: {}", e, json_str.len());
+                                eprintln!(
+                                    "[AI] 解析JSON失败: {}, 原始字符串长度: {}",
+                                    e,
+                                    json_str.len()
+                                );
                                 // 记录更详细的错误信息，包括原始字符串的前500个字符
                                 let log_str = safe_truncate(json_str, 500);
                                 eprintln!("[AI] 原始字符串前500字符: {}", log_str);
-                                
+
                                 // 检查是否是结束标记
                                 if trimmed_line != "data: [DONE]" {
                                     eprintln!("[AI] 注意: 跳过无效的JSON行");
@@ -484,7 +541,10 @@ impl AITranslator {
             }
         }
 
-        eprintln!("[AI] 流结束。共接收: {} 字节, 发送: {} 个片段", total_received, total_sent);
+        eprintln!(
+            "[AI] 流结束。共接收: {} 字节, 发送: {} 个片段",
+            total_received, total_sent
+        );
         Ok(())
     }
 
@@ -511,7 +571,8 @@ impl AITranslator {
         };
 
         // 发送请求
-        let response = self.client
+        let response = self
+            .client
             .post(&platform.api_url)
             .header("Authorization", format!("Bearer {}", platform.api_key))
             .header("Content-Type", "application/json")
@@ -522,28 +583,33 @@ impl AITranslator {
         // 获取响应状态码并保存
         let status = response.status();
         eprintln!("[AI] API响应状态: {:?}", status);
-        
+
         // 检查API响应状态码，如果不是成功状态，读取并输出响应内容
         if !status.is_success() {
             let response_text = response.text().await?;
             eprintln!("[AI] API错误响应: {}", response_text);
-            
+
             // 尝试解析错误响应JSON，提取错误消息
-            let error_message = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&response_text) {
-                // 尝试多种错误消息格式
-                if let Some(msg) = json.get("message").and_then(|m| m.as_str()) {
-                    msg.to_string()
-                } else if let Some(msg) = json.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()) {
-                    msg.to_string()
-                } else if let Some(msg) = json.get("error").and_then(|e| e.as_str()) {
-                    msg.to_string()
+            let error_message =
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&response_text) {
+                    // 尝试多种错误消息格式
+                    if let Some(msg) = json.get("message").and_then(|m| m.as_str()) {
+                        msg.to_string()
+                    } else if let Some(msg) = json
+                        .get("error")
+                        .and_then(|e| e.get("message"))
+                        .and_then(|m| m.as_str())
+                    {
+                        msg.to_string()
+                    } else if let Some(msg) = json.get("error").and_then(|e| e.as_str()) {
+                        msg.to_string()
+                    } else {
+                        response_text.clone()
+                    }
                 } else {
                     response_text.clone()
-                }
-            } else {
-                response_text.clone()
-            };
-            
+                };
+
             return Err(format!("API错误: {}", error_message).into());
         }
 

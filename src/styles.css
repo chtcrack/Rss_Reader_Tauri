@@ -201,6 +201,22 @@ body {
   background-color: var(--bg-tertiary);
 }
 
+/* 更新倒计时样式 */
+.update-countdown {
+  padding: 0.625rem 0.875rem;
+  border: 1px solid var(--border-color);
+  background-color: var(--bg-primary);
+  color: var(--text-secondary);
+  border-radius: var(--border-radius);
+  font-size: 0.875rem;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--shadow-sm);
+  min-width: fit-content;
+}
+
 /* 主内容区域 */
 .main-content {
   display: flex;

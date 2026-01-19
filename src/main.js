@@ -32,6 +32,11 @@ let currentGroupId = null;
 let currentEditingGroup = null;
 let currentEditingFeed = null;
 
+// 更新倒计时状态
+let updateCountdownElement;
+let remainingSeconds = 0;
+let countdownInterval = null;
+
 // 订阅源ID到名称的映射
 let feedMap = new Map();
 
@@ -117,11 +122,76 @@ async function loadGroupsToSelect(selectId) {
   }
 }
 
+// 获取更新剩余时间
+async function getUpdateRemainingTime() {
+  try {
+    const remaining = await invoke('get_update_remaining_time');
+    return remaining;
+  } catch (error) {
+    console.error('Failed to get update remaining time:', error);
+    return 0;
+  }
+}
+
+// 更新倒计时显示
+function updateCountdownDisplay() {
+  if (updateCountdownElement) {
+    updateCountdownElement.textContent = `下次更新: ${remainingSeconds}s`;
+  }
+}
+
+// 开始倒计时
+async function startCountdown() {
+  // 清除现有定时器
+  if (countdownInterval) {
+    clearInterval(countdownInterval);
+  }
+  
+  // 获取初始剩余时间
+  remainingSeconds = await getUpdateRemainingTime();
+  updateCountdownDisplay();
+  
+  // 设置每秒更新
+  countdownInterval = setInterval(async () => {
+    if (remainingSeconds > 0) {
+      remainingSeconds--;
+      updateCountdownDisplay();
+    } else {
+      // 倒计时结束，重新获取剩余时间
+      remainingSeconds = await getUpdateRemainingTime();
+      updateCountdownDisplay();
+    }
+  }, 1000);
+}
+
+// 重置倒计时
+async function resetCountdown() {
+  if (updateCountdownElement) {
+    updateCountdownElement.textContent = '正在更新...';
+  }
+  
+  // 清除现有定时器
+  if (countdownInterval) {
+    clearInterval(countdownInterval);
+  }
+  
+  // 等待短暂时间后重新开始倒计时
+  setTimeout(() => {
+    startCountdown();
+  }, 1000);
+}
+
 // 初始化函数，在DOM加载完成后执行
 function initEventListeners() {
   // 主题切换功能
   htmlElement = document.documentElement;
   themeToggle = document.getElementById('theme-toggle');
+  
+  // 初始化更新倒计时元素
+  updateCountdownElement = document.getElementById('update-countdown');
+  
+  // 启动倒计时
+  startCountdown();
 
   // 初始化主题
   const savedTheme = localStorage.getItem('theme') || 'light';
@@ -227,6 +297,9 @@ function initEventListeners() {
         refreshBtn.disabled = true;
         refreshBtn.textContent = '⏳';
         
+        // 重置倒计时
+        await resetCountdown();
+        
         if (currentFeedId) {
           // 更新单个RSS源
           await invoke('update_single_feed', { feedId: currentFeedId });
@@ -243,6 +316,8 @@ function initEventListeners() {
       } finally {
         refreshBtn.disabled = false;
         refreshBtn.textContent = '🔄';
+        // 重新开始倒计时
+        startCountdown();
       }
     });
   }
@@ -354,6 +429,9 @@ function initEventListeners() {
       try {
         // 调用Tauri命令更新自动更新间隔
         await invoke('update_update_interval', { interval: intervalSeconds });
+        
+        // 重新开始倒计时，立即应用新的更新间隔
+        await startCountdown();
         
         // 显示成功消息
         alert('自动更新间隔已保存，将在下次更新时生效');
